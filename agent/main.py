@@ -40,7 +40,9 @@ PARAMS = {
     "sell_batch_premium": 3,    # max units/turn for premium goods
     "sell_batch_staple": 12,    # max units/turn for wheat/egg
     "seed_buffer": 6,           # keep this many seeds of the active crop
-    "land_buy_reserve": 800,    # keep this much cash after buying land
+    "capital_reserve": 1200,    # shared cash floor for land/animal/seed spend
+    "land_buy_min_day": 10,     # let the crop engine establish before land
+    "goose_buy_min_day": 12,    # ...and later still for animals (slower payback)
     "crop_early": "WHEAT",
     "crop_main": "CARROT",
     "goose_target": 4,          # geese to own once affordable
@@ -265,7 +267,7 @@ def _market_orders(obs, farm, private, day, hour):
     if crop:
         want = PARAMS["seed_buffer"] - seeds.get(crop, 0)
         cost = CROPS[crop]["seed"]
-        if want > 0 and money > cost * want + 200:
+        if want > 0 and money > cost * want + PARAMS["capital_reserve"]:
             orders.append(["BUY_SEED", crop, want])
 
     # 4. buy wheat to feed animals if we're short
@@ -279,13 +281,14 @@ def _market_orders(obs, farm, private, day, hour):
     n_extra = len(farm.get("unlocked_quadrants", ["NW"])) - 1
     if n_extra < len(LAND_PRICES):
         price = LAND_PRICES[n_extra]
-        if money > price + PARAMS["land_buy_reserve"] and day < 22:
+        if (money > price + PARAMS["capital_reserve"]
+                and PARAMS["land_buy_min_day"] <= day < 22):
             orders.append(["BUY_LAND"])
             money -= price
 
     n_geese = _count_animals(farm, "GOOSE")
-    if n_geese < PARAMS["goose_target"] and day < 24:
-        if money > ANIMALS["GOOSE"]["cost"] + 600:
+    if n_geese < PARAMS["goose_target"] and PARAMS["goose_buy_min_day"] <= day < 24:
+        if money > ANIMALS["GOOSE"]["cost"] + PARAMS["capital_reserve"]:
             orders.append(["BUY_ANIMAL", "GOOSE", 1])
 
     return orders[:10]  # maxMarketOrdersPerTurn
