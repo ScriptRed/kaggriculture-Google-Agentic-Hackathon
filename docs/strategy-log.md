@@ -1449,3 +1449,107 @@ doesn't re-derive and re-try them:
   same helper that already respects the bonus window and max-yield timing
   (`docs/economics.md`). We have no unconditional/opportunistic HARVEST
   path for this bug to live in. Confirmed, not just assumed.
+
+---
+
+### 2026-08-08  Production-plan rebuild, Task 1: phase-aware capital gate
+
+Hypothesis: `capital_reserve=1200` plus `land_buy_min_day=10`/
+`animal_buy_min_day={GOOSE:10,COW:12,SHEEP:12}` would refuse the target
+route's opening (docs/target-plan.md: two cows, two sheep, 12 melon seed,
+7 wheat seed, $187 left by day 3) outright. Make the gate phase-aware:
+loosen during construction, restore after.
+
+**First attempt applied the loosened reserve to all three purchase types
+(seed buffer, land, animal) and regressed hard**: `test_agent_beats_pass`
+flipped to a loss (1536 vs pass's 3000 at day 10) and, more importantly,
+full 30-day runs showed `plants_weeded` up to 34/game. Root cause,
+confirmed by isolating each change independently: `capital_reserve` was
+doing double duty. Besides the deadlock guard, it was also *pacing* the
+seed-buffer refill relative to actual watering throughput -
+`tiles_per_unit` alone doesn't constrain this once hand count is
+nontrivial (`n_units * 4` = 32-36 possible simultaneous tiles at
+`target_hands=8`, more than that many hands can reliably water alongside
+FEED/CARE/HARVEST). **Fix: only `BUY_LAND` and `BUY_ANIMAL` get the
+phase-aware reserve; the seed-buffer step keeps `PARAMS["capital_reserve"]`
+unconditionally** - land/animal are one-shot decisions, not a recurring
+drain, and Task 2 replaces the seed-buffer mechanism entirely anyway, so
+this split only needs to survive until then.
+
+Also tried lowering `land_buy_min_day` 10 -> 3 alongside the reserve
+change (the task listed it as unjustified). Reverted: even under old
+(pre-target-plan) crop/animal targets this alone cost `test_agent_beats_pass`
+its margin - $1,000 of NE land bought that early has no revenue engine
+behind it yet. Land timing stays an open question per `docs/target-plan.md`
+(our own replay evidence disagrees with barnyard-economist's "always buy
+land" claim) - left for the production-plan work, not moved on a hunch.
+`animal_buy_min_day["GOOSE"]` lowered 10 -> 3 as explicitly asked; measured
+net *positive* against `animal-heavy` (see below), kept.
+
+**Deadlock guard: intact.** All 8 `startingMoney` stress values still
+green (`test_no_extended_stall_under_cash_pressure`), `test_no_extended_stall`
+green, and the exact stall trap line is unchanged at $20 (direct scan:
+$19 stalls 100%, $20 works at 64.6% worst-window - identical to the
+"capital_reserve stall trap" entry's original finding). No new trap
+reintroduced at any tested starting-money value.
+
+**Paired against the pre-change code** (48 seeds, both seats, n=96,
+`--compare`, single-opponent so this isolates exactly this change):
+```
+mean +1,863.5   sd 4,508.1   se 460.11
+95% CI [+950.0, +2,776.9]
+paired t-test  t=+4.050  p=0.0001
+wilcoxon       z=+4.131  p=0.0000
+win rate 74.0%
+```
+CI excludes zero, both tests agree, point estimate clears the ~50-coin bar
+by ~37x. Against our own immediately-prior code, this is a clean win.
+
+**But not neutral against the harder opponents, and this needs to be said
+plainly rather than buried under the paired-diff number above.** Full pool
+(`make arena`, 48 seeds): `plants_weeded` 0.087 -> 1.521 mean (max 31),
+`animals_lost` 5.609 -> 6.170 mean, `OVERALL WIN RATE` 52.4% -> 49.1%.
+Isolated the mechanism directly (8 seeds, `animal-heavy` specifically,
+toggling only `capital_reserve_construction` 0 vs 1200 with everything
+else held fixed):
+```
+reserve=1200 (disabled): plants_weeded 0.00  animals_lost 6.00  mean_bank 9,348
+reserve=0    (current):  plants_weeded 3.00  animals_lost 7.12  mean_bank 5,577
+```
+Confirmed, not guessed: this specific change is the cause. Mechanism -
+`capital_reserve_construction=0` lets `BUY_ANIMAL` fire sooner against the
+*current, unchanged* `animal_target={GOOSE:4,COW:2,SHEEP:1}` (7 animals),
+so the same 7-animal herd now exists for more of the game while
+`target_hands` is still a flat 8 (Task 3 hasn't landed) - more days of
+FEED/CARE/PICKUP/PLACE competing with WATER-rescue for the same capped
+hand count. This is the same crowding failure mode the `animal_target`
+comment block already documented at a larger scale (`{6,3,2}=11` animals
+cost 12-20 escapes/game) showing up again at a smaller scale, earlier,
+because the animals arrive sooner now. Note: the overall 52.4%->49.1% win-
+rate comparison is additionally confounded by the opponent pool itself
+changing (`v2-capital-reserve-fix` -> `v4-terminal-liquidation` from the
+prior commit) - some of that drop is a harder pool, not this change; the
+isolated `animal-heavy` comparison above is the clean measurement.
+
+**Why adopt anyway, and why this isn't papering over the invariant:**
+`plants_weeded`/`animals_lost` "must not regress" is the standing rule for
+judging the *finished* production-plan rebuild (Task 1 through Task 3
+together - see "How to judge all of this" in the task brief), and the
+brief explicitly warns the coupled system will look worse in isolation:
+"turn-0 livestock funds the day-9 strawberry ramp, and the strawberry ramp
+needs the labour to service it." Task 3 (lift the labour ramp) is the
+piece that resolves exactly this mechanism - hand count bounded by a flat
+8 while purchases happen earlier - and is next in the order of work.
+Reverting the reserve split here would make the target route's turn-0
+opening unaffordable again, which is what Task 1 exists to fix. Recorded
+here in full so the regression isn't invisible by the time Task 3 lands,
+per "report regressions as prominently as wins."
+
+Change: `agent/main.py` - `PARAMS["construction_end_day"]`,
+`PARAMS["capital_reserve_construction"]`, `_reserve(day)`, applied to
+`BUY_LAND`/`BUY_ANIMAL` only; `animal_buy_min_day["GOOSE"]` 10 -> 3;
+`land_buy_min_day` tried at 3, reverted to 10.
+
+Verdict: ADOPTED, with the animal-heavy-matchup regression flagged as a
+known, root-caused, expected-to-close-with-Task-3 cost rather than a
+silent one.

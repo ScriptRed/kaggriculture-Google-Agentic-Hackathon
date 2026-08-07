@@ -51,7 +51,22 @@ PARAMS = {
                                  # can't keep up with the resulting plants -
                                  # tried it, cost -231/-260 coins paired vs
                                  # v1 (see docs/strategy-log.md).
-    "land_buy_min_day": 10,     # let the crop engine establish before land
+    "land_buy_min_day": 10,     # tried lowering to 3 alongside the phase-
+                                 # aware reserve below - measurably worse
+                                 # even under these old (pre-target-plan)
+                                 # crop/animal targets: test_agent_beats_pass
+                                 # flipped to a loss (1536 vs pass's 3000 at
+                                 # day 10) because $1000 of NE land bought
+                                 # that early has no revenue engine behind it
+                                 # yet to work it. Reverted - land timing is
+                                 # explicitly an open question in
+                                 # docs/target-plan.md (our own real-replay
+                                 # evidence disagrees with barnyard-
+                                 # economist's "always buy land" claim), not
+                                 # something to move on a hunch. Leave it for
+                                 # the production-plan work, which will
+                                 # decide land timing against the real target
+                                 # composition instead of in isolation.
     "crop_early": "WHEAT",
     "crop_main": "CARROT",
     # Animal targets and buy-day gates, unified. Was goose_target=4,
@@ -82,7 +97,14 @@ PARAMS = {
     # Not zero - a real, measured cost of this scheduler shape, not a bug
     # left in - see the Branch 2 strategy-log entry for the full numbers.
     "animal_target": {"GOOSE": 4, "COW": 2, "SHEEP": 1},
-    "animal_buy_min_day": {"GOOSE": 10, "COW": 12, "SHEEP": 12},
+    # GOOSE lowered 10 -> 3 alongside land_buy_min_day, same reasoning:
+    # unjustified now that the phase-aware reserve does the early-spend
+    # sequencing. COW/SHEEP's day-12 gate is left alone here - the target
+    # route wants them turn-0, but that's a composition change (which
+    # animals, how many, by when), not a gate-plumbing one; it belongs to
+    # the production-plan work that replaces this whole dict, not this
+    # enabling change.
+    "animal_buy_min_day": {"GOOSE": 3, "COW": 12, "SHEEP": 12},
     "fert_reserve": 4,          # fertilizer kept for crops before selling
     # Unsold shed inventory doesn't count toward the final score (reward is
     # money only - kaggriculture.json). From this day on, drop the price
@@ -92,7 +114,44 @@ PARAMS = {
     # plenty, since a terminal SELL has no per-order quantity cap and the
     # whole shed (<=100 items) clears in one turn once the caps are off.
     "liquidation_day": 28,
+    # Construction-phase capital gate (target-plan Task 1). The target route
+    # (docs/target-plan.md) spends nearly the whole $3,000 opening bank on
+    # turn 0 - two cows, two sheep, a season's worth of melon/wheat seed -
+    # and sits at $187 by day 3, well under our flat capital_reserve=1200.
+    # Only applied to BUY_LAND/BUY_ANIMAL (see _reserve() and its two call
+    # sites below) - NOT to the seed-buffer purchase in step 3, which keeps
+    # PARAMS["capital_reserve"] unconditionally. Measured why the split
+    # matters: applying this to the seed step too (tried first) reintroduced
+    # plants_weeded (0 -> up to 34/game, seeds 11/23/37) even though
+    # tiles_per_unit is supposed to cap overplanting independent of cash -
+    # it turns out capital_reserve was *also* pacing how fast the seed
+    # buffer could refill relative to actual watering throughput, which
+    # tiles_per_unit alone doesn't constrain once hand count is nontrivial
+    # (n_units * tiles_per_unit = 9*4 = 36 possible simultaneous tiles at
+    # target_hands=8). The seed step isn't what's blocking the target
+    # route's turn-0 opening anyway - Task 2 replaces its whole selection
+    # mechanism (_pick_crop/seed_buffer) with target-driven PLANT scoring,
+    # so this split doesn't need to survive past that landing, only until
+    # then. BUY_LAND/BUY_ANIMAL are one-shot decisions, not a recurring
+    # drain, so they don't have the same pacing role.
+    #
+    # capital_reserve=1200 itself exists for a real, separate reason (the
+    # "capital_reserve stall trap" strategy-log entry: hiring must never be
+    # able to out-compete the crop engine's one bootstrap purchase for cash)
+    # - unaffected here since hiring's own seed_floor budget check and the
+    # seed step's flat reserve are both untouched. Restored to the full
+    # deadlock-guard value for land/animal too once construction ends.
+    "construction_end_day": 22,
+    "capital_reserve_construction": 0,
 }
+
+
+def _reserve(day):
+    """Cash floor for land/animal/seed spend - see construction_end_day."""
+    if day < PARAMS["construction_end_day"]:
+        return PARAMS["capital_reserve_construction"]
+    return PARAMS["capital_reserve"]
+
 
 PREMIUM = {"MELON", "STRAWBERRY", "MILK", "WOOL"}
 
@@ -629,15 +688,15 @@ def _market_orders(obs, farm, private, day, hour, inventories=None):
     n_extra = len(farm.get("unlocked_quadrants", ["NW"])) - 1
     if n_extra < len(LAND_PRICES):
         price = LAND_PRICES[n_extra]
-        if (money > price + PARAMS["capital_reserve"]
-                and PARAMS["land_buy_min_day"] <= day < 22):
+        if (money > price + _reserve(day)
+                and PARAMS["land_buy_min_day"] <= day < PARAMS["construction_end_day"]):
             orders.append(["BUY_LAND"])
             money -= price
 
     deficit_kind, deficit_room = _animal_deficit(farm, private, day, inventories)
     if deficit_kind and deficit_room > 0 and day < 26:
         cost = ANIMALS[deficit_kind]["cost"]
-        if money > cost + PARAMS["capital_reserve"]:
+        if money > cost + _reserve(day):
             orders.append(["BUY_ANIMAL", deficit_kind, 1])
 
     return orders[:10]  # maxMarketOrdersPerTurn
