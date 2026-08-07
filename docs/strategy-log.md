@@ -738,3 +738,54 @@ and issuing `DROP` after `HARVEST` - both are missing mechanics, not
 strategic disagreements, and both are now directly measurable against a
 real animal-heavy opponent in the pool instead of only against replay
 evidence we can't rerun.
+
+### 2026-08-07  Closing two parked items
+
+**(a) Rescue-water distance exemption: RESOLVED BY SIDE EFFECT, closing.**
+The original bug (v0 baseline entry): the blanket distance discount in
+`_assign` (`score - 6*dist < 10`) can drop a rescue-water task (score 100,
+"dies tonight") when the nearest free unit is >15 tiles away. That
+discount formula is **still in the code, untouched all session** - it was
+never patched directly. Confirmed resolved anyway, with real numbers, not
+just "it's 0 now so it must be fine":
+
+| version | plants_weeded, 3 seeds x 720 turns |
+|---|---|
+| v0 (original baseline) | 101 |
+| v1 (early-capital-discipline fix) | 6 |
+| v2 (current main, capital_reserve stall trap fix) | **0** |
+
+Also confirmed 0.000 across all 8 `startingMoney` stress values
+(400-3000) and across the full 576-episode expanded-pool arena run this
+session - not a one-seed fluke.
+
+Mechanism: the distance-discount formula only bites when a rescue task's
+nearest free unit is far away, which only happens when the board is
+under-served relative to its unit count - exactly the failure mode both
+the early-capital-discipline fix (v0->v1: reliable full hiring instead of
+hires collapsing under an overspent economy) and the capital_reserve
+stall trap fix (v1->v2: `peak_units` consistently 9 instead of
+sometimes-1, plus the `tiles_per_unit` cap preventing overplanting beyond
+what the hand count can service) directly target. Neither fix touched
+`_assign` or the distance-discount constant at all - both fixed the
+*reason* a unit would ever be 15+ tiles from every planted tile in the
+first place. **Closed.** If `plants_weeded` ever goes nonzero again, the
+first thing to check is whether hiring/unit-count reliability regressed,
+not whether the discount formula itself needs changing.
+
+**(b) v1 seed-variance audit: OBSOLETE, closing without running it.** The
+original ask (two sessions ago) was to re-run v0 vs v1 head-to-head and
+report the per-seed breakdown, because the win-rate-only comparison that
+justified merging v1 was below the skill's +5pp bar. That concern is fully
+superseded by the paired-differential tooling built since (Task C): a
+proper `--compare` run between any two versions now reports a paired
+t-test, Wilcoxon signed-rank, 95% CI, and an empirically-derived
+acceptance bar, all of which the original win-rate-only audit was
+explicitly trying to approximate by hand. Running the originally-requested
+audit now would just be a strictly worse version of `--compare v1-early-
+capital-discipline` (already run against `main` as part of the Task D and
+Task 3 entries above, decisively - `main` beats `v1` 100.0% with a
++171.9 to -156-ish paired differential depending on which main revision).
+Not revisiting this again - if a v0-vs-v1-specific question ever comes up,
+the answer is `python arena/run.py --compare v1-early-capital-discipline`,
+not a bespoke audit.
