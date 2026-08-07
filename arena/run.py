@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT))
 from arena.metrics import episode_metrics, format_summary  # noqa: E402
 
 SEEDS = [11, 23, 37, 41, 59, 67, 73, 89, 97, 103, 113, 127]
-DEFAULT_OPPONENTS = ["starter", "random"]
+DEFAULT_OPPONENTS = ["starter", "random", "v1-early-capital-discipline"]
 
 
 def _load_agent(spec):
