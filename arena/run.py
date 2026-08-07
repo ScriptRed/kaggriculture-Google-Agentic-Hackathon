@@ -17,7 +17,10 @@ casually - if you do, every prior result in strategy-log.md is invalidated.
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -31,11 +34,57 @@ SEEDS = [11, 23, 37, 41, 59, 67, 73, 89, 97, 103, 113, 127]
 DEFAULT_OPPONENTS = ["starter", "random", "v1-early-capital-discipline"]
 
 
-def _load_agent(spec):
-    """spec is 'starter'/'random'/'pass', a frozen pool name, or a path."""
+def _git_info():
+    """(sha, dirty) of the working tree, best-effort. Every arena result must
+    be attributable to an exact code state - see docs/strategy-log.md
+    "Arena determinism and noise-floor audit"."""
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except Exception:
+        sha = "unknown"
+    try:
+        dirty = bool(subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=ROOT, text=True, stderr=subprocess.DEVNULL
+        ).strip())
+    except Exception:
+        dirty = None
+    return sha, dirty
+
+
+def _snapshot_agent_dir():
+    """Copy agent/ into an isolated temp dir and run every episode against
+    that snapshot instead of the live working tree.
+
+    Root cause of a phantom "v0 stalls" result in a prior session: arena
+    subprocesses were reading agent/main.py off disk while it was being
+    edited in the foreground of the same working tree. This makes that
+    structurally impossible - once copied, nothing running this arena
+    invocation can see a subsequent edit. Not cleaned up automatically: for
+    a dirty working tree, this snapshot is the only exact record of the code
+    that actually ran, so it stays on disk for later inspection.
+    """
+    snap_root = Path(tempfile.mkdtemp(prefix="kaggri_arena_"))
+    shutil.copytree(ROOT / "agent", snap_root / "agent")
+    return snap_root / "agent"
+
+
+def _load_agent(spec, snapshot_agent_dir):
+    """spec is 'starter'/'random'/'pass', a frozen pool name, or a path.
+
+    Any path that resolves inside the live agent/ directory (this includes
+    the default --candidate) is redirected into the isolated snapshot.
+    """
     if spec in ("starter", "random", "pass"):
         return spec
-    p = Path(spec)
+    p = Path(spec).resolve()
+    agent_dir = (ROOT / "agent").resolve()
+    try:
+        rel = p.relative_to(agent_dir)
+        return str(snapshot_agent_dir / rel)
+    except ValueError:
+        pass
     if p.exists():
         return str(p)
     frozen = ROOT / "arena" / "opponents" / spec / "main.py"
@@ -45,11 +94,11 @@ def _load_agent(spec):
 
 
 def _play(args):
-    candidate, opponent, seed, swap, episode_steps = args
+    candidate, opponent, seed, swap, episode_steps, snapshot_agent_dir = args
     from kaggle_environments import make
 
-    a = _load_agent(candidate)
-    b = _load_agent(opponent)
+    a = _load_agent(candidate, snapshot_agent_dir)
+    b = _load_agent(opponent, snapshot_agent_dir)
     order = [b, a] if swap else [a, b]
     me = 1 if swap else 0
 
@@ -90,10 +139,16 @@ def main():
     else:
         seeds, opponents = SEEDS[:args.seeds], args.opponents
 
+    sha, dirty = _git_info()
+    snapshot_agent_dir = _snapshot_agent_dir()
+
     # play both seats of every pairing - seat 0 spawns advantageously
-    jobs = [(args.candidate, opp, s, swap, args.steps)
+    jobs = [(args.candidate, opp, s, swap, args.steps, snapshot_agent_dir)
             for opp in opponents for s in seeds for swap in (False, True)]
 
+    print(f"git:       {sha}{'  (DIRTY - uncommitted changes)' if dirty else ''}")
+    print(f"snapshot:  {snapshot_agent_dir}")
+    print(f"opponents: {', '.join(opponents)}")
     print(f"arena: {len(jobs)} episodes  "
           f"({len(seeds)} seeds x {len(opponents)} opponents x 2 seats)")
 
@@ -123,7 +178,19 @@ def main():
     print(format_summary(rows))
 
     if args.json:
-        Path(args.json).write_text(json.dumps(rows, indent=2, default=str))
+        payload = {
+            "meta": {
+                "git_sha": sha,
+                "git_dirty": dirty,
+                "snapshot_agent_dir": str(snapshot_agent_dir),
+                "candidate": args.candidate,
+                "opponents": opponents,
+                "seeds": seeds,
+                "steps": args.steps,
+            },
+            "episodes": rows,
+        }
+        Path(args.json).write_text(json.dumps(payload, indent=2, default=str))
         print(f"\nwrote {args.json}")
 
     return 0 if not errs else 1
