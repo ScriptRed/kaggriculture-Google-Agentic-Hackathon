@@ -31,7 +31,7 @@ sys.path.insert(0, str(ROOT))
 from arena.metrics import episode_metrics, format_summary  # noqa: E402
 
 SEEDS = [11, 23, 37, 41, 59, 67, 73, 89, 97, 103, 113, 127]
-DEFAULT_OPPONENTS = ["starter", "random", "v1-early-capital-discipline"]
+DEFAULT_OPPONENTS = ["starter", "random_seeded", "v1-early-capital-discipline"]
 
 
 def _git_info():
@@ -101,6 +101,11 @@ def _play(args):
     b = _load_agent(opponent, snapshot_agent_dir)
     order = [b, a] if swap else [a, b]
     me = 1 if swap else 0
+
+    # kaggle_environments clears configuration["seed"] before agents see it
+    # (verified empirically - see strategy-log), so opponents that need a
+    # reproducible RNG (arena/opponents/random_seeded) read it from here.
+    os.environ["KAGGRI_ARENA_SEED"] = str(seed)
 
     env = make("kaggriculture",
                configuration={"episodeSteps": episode_steps, "seed": seed},
