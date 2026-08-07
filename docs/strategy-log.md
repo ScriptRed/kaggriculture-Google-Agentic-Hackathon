@@ -1309,3 +1309,143 @@ Arena: not run - no `agent/` behavior changed.
 Verdict: ADOPTED (as the target-plan reference for the next branch; land
 quantity/timing explicitly carved out as unresolved pending its own
 experiment, not adopted from either source).
+
+---
+
+### 2026-08-07  Task 4a: SELL order-safety - already compliant, no change
+
+Hypothesis: per the task brief (sourced from v13-r3), front-inserting a new
+SELL at position 0 of the market-orders list loses because it delays a
+higher-value same-turn sale; appending, or merging into an existing
+same-item order, wins - check whether we do this and adopt append/merge if
+not.
+
+Read v13-r3's own notebook directly to get the precise mechanism (the task
+brief's summary was accurate but worth quoting exactly): an earlier
+prototype used `market.insert(0, ["SELL", item, target])` to preempt an
+opponent's predicted next-turn sale; R3 replaced it with `market.append(...)`,
+merging into an existing same-item order if one is already queued. Quote:
+"Front insertion can delay a higher-value base sale - especially
+STRAWBERRY - and reverse the intended benefit."
+
+Checked `agent/main.py::_market_orders`: **we already comply, structurally,
+not by policy choice that could regress.** `orders` is built by a single
+`.append()` per order type in one linear pass (`orders = []` then only
+`orders.append(...)` calls, `grep -n "orders\\b"` finds zero `.insert(`
+anywhere in the file). The SELL step iterates `shed.items()` - a dict, one
+entry per item - so there is structurally only ever one SELL order per item
+per call; there is nothing to merge because there is never a duplicate to
+begin with. This isn't a policy that happens to append today and could
+regress tomorrow without someone reordering the function; the order list is
+built by straight-line sequential code with no reordering step at all.
+
+Change: none. Verified by code reading, not by an arena run - there is no
+behavior difference to measure between "append" and a front-insert that
+doesn't exist in this codebase.
+
+Verdict: N/A - confirmed compliant, nothing to adopt or reject.
+
+---
+
+### 2026-08-07  Task 4b: terminal liquidation - unsold shed value was being stranded
+
+Hypothesis: the reward is bank money only (`kaggriculture.json`: `"reward":
+"Player money at end of game"`) - shed inventory never counts, at any
+point, including turn 720. Our `_market_orders` sell step holds back stock
+for reasons that only make sense if there's a future to protect (a price
+floor at 65% of base, a 4-unit fertilizer reserve, a wheat reserve for
+animal feed, and small per-turn batch caps of 3/12 units) - near the end of
+the episode there is no future left, so those same protections strand
+value instead of protecting it.
+
+Change: added `PARAMS["liquidation_day"] = 28`. From day 28 on, the SELL
+step in `_market_orders` (`agent/main.py`) drops the floor, the fertilizer
+and wheat reserves, and the batch caps, and sells the entire held quantity
+of every item every turn. Two days of lead time is generous - a terminal
+SELL has no per-order quantity cap in the env, so a <=100-item shed clears
+in one turn once the caps are off; this just gives slack against the
+10-orders/turn limit and lets multiple item types drain across a couple of
+turns if needed.
+
+Arena, paired against the pre-change code (frozen as a temporary reference,
+commit `43ce869`, both seats, all 48 seeds, n=96):
+```
+vs pre-change   win rate  89.6%  (was N/A - same-lineage self-play, not a
+                                   ladder-facing comparison)
+    bank diff (dev signal): n=96  mean=+2,422.0  sd=1,966.9  se=200.75
+    95% CI: [+2,023.5, +2,820.6]
+    paired t-test:  t=+12.065  df=95  p=0.0000
+    wilcoxon:       z=+7.767   p=0.0000
+```
+CI excludes zero by a wide margin, t-test and Wilcoxon agree, point
+estimate (+2,422) is ~48x the ~50-coin acceptance bar. Clean ADOPT.
+
+Full pool (`make arena`, same 6-opponent pool and 48 seeds as the
+2026-08-07 "Re-baseline" entry, for direct comparison):
+```
+                          mean bank diff (was ->  now)     win rate (was -> now)
+vs starter                 +10,474.3 -> +11,035.8            100.0% (unchanged)
+vs random_seeded           +14,680.6 -> +15,123.5            100.0% (unchanged)
+vs v2-capital-reserve-fix   +3,726.3 ->  +5,901.3            100.0% (unchanged)
+vs animal-heavy            -41,586.4 -> -38,585.4              0.0% (unchanged)
+vs melon-rush               -26,014.6 -> -25,623.3              0.0% (unchanged)
+vs market-dumper            -3,945.6 ->  -2,124.6             4.2% -> 14.6%
+
+OVERALL WIN RATE  50.7% -> 52.4%  (576 episodes)
+```
+Every opponent's bank differential improved - expected, since a pure
+end-of-game value-recovery fix should help uniformly regardless of matchup
+strategy - and the closest-margin opponent (`market-dumper`) is the one
+where it was large enough to flip games (4.2% -> 14.6% win rate). Doesn't
+touch the structural gaps against `animal-heavy`/`melon-rush` (Task 2's
+subject), as expected - this fixes value leakage, not strategy.
+
+Known unmodeled edge case, not measured separately: dropping the wheat
+reserve in the liquidation window means an animal could go unfed on day 28
+if a unit hasn't yet carried wheat from shed to trough before the SELL
+order clears the shed that turn, risking an escape and losing day-29
+production/fertilizer from that one animal. Not worth gating on given the
+measured net result is a clean, large win - flagged here rather than
+silently ignored, in case a future change to the liquidation window size
+needs to reason about it.
+
+Change: `agent/main.py` (`PARAMS["liquidation_day"]`, `_market_orders` step
+2). Frozen as `arena/opponents/v4-terminal-liquidation`, replacing
+`v2-capital-reserve-fix` in `DEFAULT_OPPONENTS` (`arena/run.py`) as the
+own-lineage baseline future versions must beat.
+
+Verdict: ADOPTED.
+
+---
+
+### 2026-08-07  REJECTED-by-others (recorded so we don't retry these)
+
+Per the task brief, two findings from other public notebooks' own
+experiments, not our own arena runs - recorded here so a future session
+doesn't re-derive and re-try them:
+
+- **Front-inserting a new SELL order at position 0 of the market-orders
+  list.** v13-r3's own prototype tried `market.insert(0, [...])` to
+  preempt a predicted opponent sale and found it delays the agent's own
+  higher-value same-turn sales, reversing the intended benefit. Their fix
+  was `append` + merge-into-existing-same-item-order (see the Task 4a
+  entry above - we already do this structurally). Not applicable as a
+  regression risk today since we have no reordering step to introduce a
+  front-insert into, but relevant if a future change ever builds `orders`
+  by mutating an existing list rather than a single linear pass.
+- **Filling a recorded route's idle `PASS` slots with any available
+  in-place action.** barnyard-economist measured this directly: 812 of
+  ~6,000 worker-actions in its 719-step route were `PASS` (13%, looking
+  like free capacity); filling them cost 8,685 coins across four seeds,
+  because opportunistic `HARVEST` destroyed one-time crops before max
+  yield. Substitutions that excluded `HARVEST` were byte-identical (no
+  gain, no loss). Doesn't directly transfer to our own closed-loop
+  scheduler (we don't have a fixed recording to patch), but checked whether
+  the underlying lesson does: **does our own tile-scoring loop ever score
+  HARVEST as an idle-turn filler rather than a genuinely mature crop?**
+  Read `agent/main.py` directly - no. Every HARVEST task is gated on
+  `age >= harvest_age(crop, fertilized)` (one-time crops) or
+  `cd["ongoing"]` with `units > 0` (ongoing crops); `harvest_age` is the
+  same helper that already respects the bonus window and max-yield timing
+  (`docs/economics.md`). We have no unconditional/opportunistic HARVEST
+  path for this bug to live in. Confirmed, not just assumed.
