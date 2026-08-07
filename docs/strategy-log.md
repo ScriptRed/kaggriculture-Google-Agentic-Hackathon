@@ -1553,3 +1553,66 @@ Change: `agent/main.py` - `PARAMS["construction_end_day"]`,
 Verdict: ADOPTED, with the animal-heavy-matchup regression flagged as a
 known, root-caused, expected-to-close-with-Task-3 cost rather than a
 silent one.
+
+---
+
+### 2026-08-08  Production-plan rebuild, Task 4: route-proxy yardstick opponent
+
+Hypothesis: the existing pool (`animal-heavy`, `melon-rush`, `market-dumper`)
+was built before we had a verified census of what a strong farm actually
+does - build a closed-loop approximation of the verified ~195-202k route
+(`docs/target-plan.md`) as a real yardstick.
+
+Built `arena/opponents/route-proxy/main.py`: a day-indexed target board
+(crop tile counts, animal counts) linearly interpolated between the
+verified census breakpoints, executed by the same greedy multi-pass
+scorer shape as `animal-heavy` (feed/deliver-animal/pickup/tile-tasks),
+not a recording.
+
+**First version collapsed completely**: final bank $13, 14 total hires
+across 30 days, money stuck at exactly $0 for 20+ days straight. Root-
+caused through three separate bugs, each confirmed by isolating it before
+fixing the next:
+1. The hire budget formula (`min(money*0.25, max(0, money-50))`) floors to
+   zero whenever money <= $50 - blocks even a $1 hire. Exactly the
+   "capital_reserve stall trap" pattern, in a new function. Fixed: hiring
+   gets no cash floor at all (`budget = money`) - fib cost is trivially
+   cheap next to any real purchase.
+2. Even fixed, the census's own hand numbers (1 hand at d05, matching what
+   a hand-optimized 719-step recording needed) starve a live greedy
+   scorer trying to service 12 melon + 7 wheat + 2 cow + 2 sheep from day
+   0. Front-loaded `HAND_SCHEDULE` to 8 hands from day 0 instead of
+   ramping from 1 at day 5 - deliberately not census-faithful on this one
+   axis, because the census's efficiency assumes a precision no greedy
+   policy can match.
+3. Land+animal purchases running every hour (not gated to hour 0) bought
+   the entire turn-0 opening within the first few hours of day 0, before
+   hiring had a chance to establish anything. Hour-gated both to once/day.
+4. Uncapped seed-buffer buying (no `tiles_per_unit`-equivalent) reproduced
+   the same overplanting-vs-watering-capacity failure Task 1 found in
+   `agent/main.py` - added the same cap.
+
+After all four fixes: 0 crashes across 12 seeds, mean bank ~$19,600 with
+this opponent alone, zero animals lost, land capped at exactly NE+SW (the
+census's "never the $4,000 SE quadrant" - confirmed in every run).
+`plants_weeded` still elevated (mean ~11/game) - a real, accepted
+imprecision given this only needs to be strategically faithful, not
+optimal; not held to our own agent's zero-weeding bar since it's a test
+opponent, not the submission.
+
+Added to `DEFAULT_OPPONENTS`, full pool (`make arena`, current main
+including the Task 1 change):
+```
+vs route-proxy   win rate 47.9%   mean bank 13,517.8
+    bank diff: mean -974.3   95% CI [-2,221.8, +273.2]   (includes zero)
+```
+This is the most informative opponent in the pool by a wide margin - not
+a blowout either direction, unlike `animal-heavy`/`melon-rush`
+(-42,142/-26,757) or the trivial baselines (+10,425/+13,002). A genuinely
+close, real yardstick instead of only "we crush the weak ones and get
+crushed by the strong ones."
+
+Change: `arena/opponents/route-proxy/main.py` (new), `arena/run.py`
+(`route-proxy` added to `DEFAULT_OPPONENTS`).
+
+Verdict: ADOPTED.

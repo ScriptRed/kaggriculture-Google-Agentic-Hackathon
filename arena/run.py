@@ -50,6 +50,12 @@ DEFAULT_OPPONENTS = [
     # docs/ladder-observations.md and docs/meta-analysis.md): every prior
     # opponent above is our own lineage or a trivial baseline.
     "animal-heavy", "melon-rush", "market-dumper",
+    # The real yardstick: a closed-loop approximation of the verified
+    # ~195-202k public route (docs/target-plan.md), not an improvised
+    # archetype - see arena/opponents/route-proxy/main.py. Everything above
+    # was built before we had a verified census of what a strong farm
+    # actually looks like.
+    "route-proxy",
 ]
 
 
