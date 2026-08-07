@@ -17,3 +17,4 @@ arena/results/*.json
 replays/
 logs/
 *.replay.json
+prompts/
