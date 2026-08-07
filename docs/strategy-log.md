@@ -1169,3 +1169,63 @@ least new plumbing, and unlike #2 it doesn't require re-litigating the
 animal-target tuning from Branch 2 before there's data to justify it.
 
 No verdict - this entry is a measurement and a proposal, not a change.
+
+---
+
+### 2026-08-07  Economics correction: yield x price was the wrong ranking
+
+Hypothesis: `docs/economics.md`'s crop ranking (`yield/tile/day x base
+price`, melon ~$137 first, strawberry ~$29 fifth) is the right way to rank
+crops.
+
+Finding: **it is not.** That ranking prices what one unit sells for, not
+how many units/day the market can absorb before the price crashes - it
+ignores that the town *removes* stock every tick, which is what
+regenerates room to sell into. Re-derived from `SHOPS` and `_town_consume`
+in kaggriculture.py: sustainable revenue = town demand rate (shops +
+centre, both day-dependent) x base price. Full derivation, Monte Carlo
+verification against the env's own unlock RNG, and cross-check against
+`what-every-crop-pays` (corroborates qualitatively) and
+`structured-economic-policy` (corroborates at the code level - its
+`_town_demand_per_day` is the same formula, independently written) are in
+the rewritten `docs/economics.md`. `moon-counts-melons` turned out not to
+be about crop economics despite its name (it's a mirror-detection
+notebook - see the Task 5 doc) and had nothing to check against.
+
+Corrected ranking (sustainable $/day, shop demand only): STRAWBERRY 2,880,
+MILK 2,880, WOOL 2,400, WHEAT 750, TOMATO 720, CARROT 630, EGG 600,
+**MELON 0** - no `SHOPS` entry lists melon at all. Melon's only demand is
+the town centre (2/day before day 10, rising to 8/day after day 20),
+shared with the opponent, and melon can't even be harvested before day 10.
+
+**This directly undermines the reasoning in the immediately preceding
+entry's #1 recommendation.** That entry cites melon-rush's own docstring
+claim of "~118/tile-day vs ~22-28" (the same yield x price arithmetic just
+shown to be wrong) as justification for melon being the next branch. It
+does **not** undermine the measured result - melon-rush really does beat
+current main by -26,014 mean, that number stands - but the *why* needs
+new evidence, not the old ranking. Checked `arena/opponents/melon-rush/
+main.py`: it plants melon on every available tile with no cap tied to
+demand (`if days_left >= MELON_MAX_YIELD_DAY and seeds.get("MELON",0)>0:
+plant`), i.e. an unconstrained monoculture that, on the corrected numbers,
+should be flooding a near-zero-demand channel. That it still wins by a
+large margin most likely says more about how weak our current baseline's
+own crop allocation is (still WHEAT/CARROT only, per that entry) than it
+does about melon being intrinsically strong - but this is a hypothesis,
+not yet measured, and Task 2 (`docs/target-plan.md`) is where it gets
+tested against the public notebooks' actual production routes rather than
+against our own weak baseline.
+
+Change: none to `agent/` policy behavior. Added `sustainable_rate(item,
+day, unlocked_shops=None)` to `agent/constants.py` (pure function, demand
+side only) plus `TOWN_CENTER_PRODUCTS`, `TOWN_CENTER_DEMAND_SCHEDULE`,
+`SHOP_UNLOCK_INTERVAL`, `SHOP_SELL_TICKS_PER_DAY`,
+`CENTER_SELL_TICKS_PER_DAY`, `shops_unlocked_by_day`,
+`town_center_multiplier`. 8 new tests in `tests/test_constants.py`,
+`make test` green (103 passed).
+
+Arena: not run - no `agent/` behavior changed, this is docs + a pure
+helper function the policy doesn't call yet.
+
+Verdict: ADOPTED (as a corrected model; not yet wired into `agent/`
+policy - that's the subject of the target-plan work this unblocks).

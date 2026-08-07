@@ -76,3 +76,100 @@ def test_wheat_and_carrot_need_fertilizer_for_max():
     for crop in ("WHEAT", "CARROT"):
         assert C.expected_yield(crop, False) < C.CROPS[crop]["max_yield"]
         assert C.expected_yield(crop, True) == C.CROPS[crop]["max_yield"]
+
+
+# --- town demand -------------------------------------------------------
+
+def test_town_center_schedule_matches_env():
+    assert C.TOWN_CENTER_DEMAND_SCHEDULE == env_mod.TOWN_CENTER_DEMAND_SCHEDULE
+    assert C.TOWN_CENTER_PRODUCTS == env_mod.TOWN_CENTER_PRODUCTS
+
+
+def test_melon_has_no_shop_demand():
+    """No SHOPS entry lists melon - town centre is its only buyer."""
+    assert all("MELON" not in products for products in C.SHOPS.values())
+
+
+def test_sustainable_rate_melon_is_center_only():
+    for day, mult in [(0, 1), (9, 1), (10, 2), (19, 2), (20, 4), (29, 4)]:
+        assert C.sustainable_rate("MELON", day) == C.CENTER_SELL_TICKS_PER_DAY * mult
+        assert C.sustainable_rate("MELON", day, unlocked_shops=list(C.SHOPS)) == \
+            C.CENTER_SELL_TICKS_PER_DAY * mult
+
+
+def test_sustainable_rate_fertilizer_has_no_town_demand():
+    assert C.sustainable_rate("FERTILIZER", 25) == 0
+
+
+def test_sustainable_rate_live_mode_matches_manual_count():
+    # One single-product shop (YARN_STORE, wool) and one multi-product shop
+    # (FARMERS_MARKET) unlocked; check both shop math and the additive
+    # centre term by hand.
+    unlocked = ["YARN_STORE", "FARMERS_MARKET"]
+    assert C.sustainable_rate("WOOL", 5, unlocked_shops=unlocked) == \
+        C.CENTER_SELL_TICKS_PER_DAY * 1 + C.SHOP_SELL_TICKS_PER_DAY * 2
+    assert C.sustainable_rate("WHEAT", 5, unlocked_shops=unlocked) == \
+        C.CENTER_SELL_TICKS_PER_DAY * 1 + C.SHOP_SELL_TICKS_PER_DAY * 1
+    assert C.sustainable_rate("MELON", 5, unlocked_shops=unlocked) == \
+        C.CENTER_SELL_TICKS_PER_DAY * 1
+
+
+def test_sustainable_rate_steady_state_matches_full_shop_rate():
+    """By day 24 all 8 shops have unlocked in expectation (min(8, 24//3) == 8)."""
+    assert C.shops_unlocked_by_day(24) == len(C.SHOPS)
+    for item in set(C.PRODUCTS) - {"FERTILIZER"}:
+        expected_shop = C._item_shop_full_rate(item)
+        got_shop = C.sustainable_rate(item, 24) - C.CENTER_SELL_TICKS_PER_DAY * C.town_center_multiplier(24)
+        assert got_shop == pytest.approx(expected_shop)
+
+
+def _reference_shop_unlock_schedule(seed, n_days=30):
+    """Transcribed from kaggriculture.py's `_end_of_day` shop-unlock block
+    (the only part of `sustainable_rate`'s expected-mode that isn't a pure
+    function of public constants - it depends on the env's per-day RNG)."""
+    import random
+    unlocked, schedule = [], {}
+    for day in range(n_days):
+        next_day = day + 1
+        rng = random.Random((seed * 1_000_003) ^ day)
+        if next_day > 0 and next_day % C.SHOP_UNLOCK_INTERVAL == 0:
+            remaining = [s for s in C.SHOPS if s not in unlocked]
+            if remaining:
+                choice = rng.choice(sorted(remaining))
+                unlocked.append(choice)
+                schedule[choice] = next_day
+    return schedule
+
+
+def test_sustainable_rate_expected_mode_matches_monte_carlo_of_env_rng():
+    """`sustainable_rate`'s no-`unlocked_shops` mode claims to be the exact
+    expectation over the env's per-episode random shop-unlock order. Verify
+    that claim empirically by simulating the env's own unlock algorithm
+    across many seeds, rather than trusting the k/8 argument by inspection.
+    """
+    import random as _random
+    rng = _random.Random(12345)
+    n_trials = 3000
+    days_to_check = [0, 3, 9, 15, 21, 27]
+    items = ["STRAWBERRY", "WHEAT", "WOOL", "CARROT"]
+
+    totals = {item: {d: 0.0 for d in days_to_check} for item in items}
+    for _ in range(n_trials):
+        seed = rng.randrange(10**9)
+        schedule = _reference_shop_unlock_schedule(seed)
+        for item in items:
+            for d in days_to_check:
+                rate = sum(
+                    C.SHOP_SELL_TICKS_PER_DAY * C._shop_unit_rate(s)
+                    for s, day_unlocked in schedule.items()
+                    if item in C.SHOPS[s] and day_unlocked <= d
+                )
+                totals[item][d] += rate
+
+    for item in items:
+        for d in days_to_check:
+            empirical = totals[item][d] / n_trials
+            model = C.sustainable_rate(item, d) - (
+                C.CENTER_SELL_TICKS_PER_DAY * C.town_center_multiplier(d)
+                if item in C.TOWN_CENTER_PRODUCTS else 0)
+            assert empirical == pytest.approx(model, abs=0.6), (item, d)

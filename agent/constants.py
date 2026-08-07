@@ -58,6 +58,80 @@ SHOPS = {
 CROP_PRODUCTS = set(CROPS)
 ANIMAL_PRODUCTS = {a["product"] for a in ANIMALS.values()}
 
+# --- town demand -------------------------------------------------------
+#
+# Two independent consumers pull inventory down (which is what holds price
+# up - see market_price below): town shops and the town centre. Both are
+# transcribed from `_town_consume` / `_end_of_day` in kaggriculture.py.
+
+SHOP_UNLOCK_INTERVAL = 3      # env: townShopUnlockInterval. 1st shop unlocks day 3.
+SHOP_SELL_TICKS_PER_DAY = 24 // 4    # env: townShopSellInterval (4 turns/tick)
+CENTER_SELL_TICKS_PER_DAY = 24 // 12  # env: townCenterSellInterval (12 turns/tick)
+
+TOWN_CENTER_PRODUCTS = [p for p in PRODUCTS if p != "FERTILIZER"]
+# (day_threshold, multiplier), env: TOWN_CENTER_DEMAND_SCHEDULE, highest first.
+TOWN_CENTER_DEMAND_SCHEDULE = [(20, 4), (10, 2), (0, 1)]
+
+
+def _shop_unit_rate(shop):
+    """Units pulled per tick, per product that shop sells (2x if single-product)."""
+    return 2 if len(SHOPS[shop]) == 1 else 1
+
+
+def _item_shop_full_rate(item):
+    """Units/day this item would earn from shops if every shop selling it
+    were unlocked (the steady state reached once all 8 shops are open,
+    day >= 8 * SHOP_UNLOCK_INTERVAL = 24)."""
+    return sum(SHOP_SELL_TICKS_PER_DAY * _shop_unit_rate(s)
+               for s, products in SHOPS.items() if item in products)
+
+
+def town_center_multiplier(day):
+    for threshold, mult in TOWN_CENTER_DEMAND_SCHEDULE:
+        if day >= threshold:
+            return mult
+    return 1
+
+
+def shops_unlocked_by_day(day):
+    """Number of shops unlocked entering `day`.
+
+    *Which* shops is chosen uniformly at random per episode (one new shop
+    every SHOP_UNLOCK_INTERVAL days, picked from those remaining) - only
+    the count is deterministic.
+    """
+    return min(len(SHOPS), max(0, day) // SHOP_UNLOCK_INTERVAL)
+
+
+def sustainable_rate(item, day, unlocked_shops=None):
+    """Units/day the town will buy of `item` on `day` - demand, not
+    revenue. Multiply by a price (e.g. MARKET_PARAMS[item]["base"]) to get
+    coins/day. This is what the market can absorb *without* the seller
+    depressing their own price - the town removes stock every tick,
+    regenerating the room sales opened up.
+
+    Two modes:
+    - `unlocked_shops` given (pass the live `obs["town"]["unlocked_shops"]`):
+      exact, for in-game decisions.
+    - `unlocked_shops=None` (planning without an episode, e.g. ranking
+      crops before day 0): the *expected* rate. Because shop unlock order
+      is a uniformly random permutation of the 8 shops, the probability a
+      specific shop carrying `item` is unlocked by `day` is exactly
+      shops_unlocked_by_day(day) / len(SHOPS) - this is exact in
+      expectation, not a heuristic (verified against the env's own RNG by
+      Monte Carlo; see tests/test_constants.py).
+    """
+    center = (CENTER_SELL_TICKS_PER_DAY * town_center_multiplier(day)
+              if item in TOWN_CENTER_PRODUCTS else 0)
+
+    if unlocked_shops is not None:
+        shop = sum(SHOP_SELL_TICKS_PER_DAY * _shop_unit_rate(s)
+                   for s in unlocked_shops if item in SHOPS.get(s, ()))
+    else:
+        shop = _item_shop_full_rate(item) * shops_unlocked_by_day(day) / len(SHOPS)
+
+    return center + shop
+
 
 # --- price model -----------------------------------------------------------
 
