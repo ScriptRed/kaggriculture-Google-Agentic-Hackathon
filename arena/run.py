@@ -43,7 +43,7 @@ SEEDS = [
     996510, 635145, 964674, 929061, 59803, 563431, 241203, 717227, 702931,
     564425, 638423, 948091, 154341, 94953, 956778, 659543, 909170, 757581,
 ]
-DEFAULT_OPPONENTS = ["starter", "random_seeded", "v1-early-capital-discipline"]
+DEFAULT_OPPONENTS = ["starter", "random_seeded", "v2-capital-reserve-fix"]
 
 
 def _git_info():
