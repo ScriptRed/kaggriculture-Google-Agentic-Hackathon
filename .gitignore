@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# never commit credentials
+.kaggle/
+kaggle.json
+access_token
+*.token
+.env
+
+# artefacts
+submission.tar.gz
+arena/results/*.json
+replays/
+logs/
+*.replay.json

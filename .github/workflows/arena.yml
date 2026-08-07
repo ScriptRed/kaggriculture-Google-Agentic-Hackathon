@@ -1,0 +1,33 @@
+name: arena
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -U kaggle-environments pytest
+      - name: Tests
+        run: python -m pytest tests/ -q
+      - name: Arena
+        run: python arena/run.py --seeds 6 --json arena/results/ci.json | tee arena.txt
+      - name: Comment win rate
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const out = fs.readFileSync('arena.txt', 'utf8');
+            const tail = out.split('\n').slice(-16).join('\n');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '```\n' + tail + '\n```'
+            });
