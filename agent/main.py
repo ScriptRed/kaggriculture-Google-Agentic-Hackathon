@@ -91,6 +91,44 @@ def _unlocked(tile):
     return tile != "LOCKED"
 
 
+# --- inventory / DROP --------------------------------------------------
+#
+# HARVEST lands in the harvesting unit's own personal inventory
+# (private["inventories"][idx]), not the shed - SELL only ever reads the
+# shed. We never issued DROP until now, so everything we harvested was
+# unsellable until the automatic end-of-day sweep (see docs/
+# ladder-observations.md). Inventory is per-unit and non-transferable
+# (there is no unit-to-unit handoff action), so a dedicated "runner" that
+# collects other units' harvests isn't actually possible - the harvesting
+# unit itself has to be the one to walk it to the shed. The real design
+# question is only ever *when that detour is worth it*, not who does it.
+#
+# First attempt scored DROP as an unconditional pre-pass, decided before
+# the tile-task scorer ever saw the board - it could and did steal a unit
+# away from an urgent rescue-water task (score 100, dies tonight),
+# reintroducing plants_weeded > 0 for the first time since the capital_
+# reserve stall trap fix. DROP must never outrank real work. It's folded
+# into _assign's existing idle-unit fallback instead: only a unit _assign
+# already decided has nothing better to do this turn gets offered the
+# choice to walk toward the shed and drop, instead of walking there with
+# no purpose. A unit mid-errand on something that actually scored keeps
+# carrying its inventory another turn - selling one turn later costs
+# nothing; missing a rescue-water task costs the whole plant.
+
+def _inventory_value(inv, prices):
+    """Sellable-goods value of a carried inventory at current posted
+    prices. Excludes animals (never relevant yet - BUY_ANIMAL/PICKUP don't
+    exist in this file - but kept explicit so a future animal-pipeline
+    change can't have a carried, not-yet-placed animal misread as
+    droppable stock and dumped into the shed as an item)."""
+    total = 0
+    for item, qty in (inv or {}).items():
+        if qty <= 0 or item in ANIMALS:
+            continue
+        total += qty * prices.get(item, MARKET_PARAMS.get(item, {}).get("base", 0))
+    return total
+
+
 def _iter_tiles(farm):
     tiles = farm["tiles"]
     for y, row in enumerate(tiles):
@@ -193,7 +231,7 @@ def _pick_crop(farm, seeds, day):
 
 # --- assignment ------------------------------------------------------------
 
-def _assign(units, tasks, board_size):
+def _assign(units, tasks, board_size, inventories=None, prices=None):
     """Greedy: best task first, to its nearest free unit."""
     actions = [None] * len(units)
     tasks = sorted(tasks, key=lambda t: -t[0])
@@ -219,12 +257,24 @@ def _assign(units, tasks, board_size):
         actions[best_i] = move if move else action
         taken_tiles.add(pos)
 
+    # Idle units (nothing scored high enough above to claim them) walk to
+    # the shed to be central for next turn. If an idle unit is also
+    # carrying sellable inventory, DROP it once there instead of just
+    # standing on the tile with no purpose - this can only ever claim a
+    # turn _assign already decided was otherwise unproductive, so it can
+    # never preempt a real task (in particular, never a rescue-water task -
+    # see the comment above _inventory_value for why an earlier version
+    # got this wrong).
     shed = _shed_tiles(board_size)
     for i, a in enumerate(actions):
         if a is None:
-            # idle unit: walk to the shed so it's central for next turn
+            inv = inventories[i] if inventories and i < len(inventories) else None
+            carrying = _inventory_value(inv, prices or {}) > 0 if inv else False
             target = min(shed, key=lambda s: _manhattan(units[i], s))
-            actions[i] = _step_toward(units[i], target) or PASS
+            if units[i] == target and carrying:
+                actions[i] = ["DROP"]
+            else:
+                actions[i] = _step_toward(units[i], target) or (["DROP"] if carrying else PASS)
     return actions
 
 
@@ -358,8 +408,11 @@ def _agent(obs):
     board_size = len(farm["tiles"])
 
     units = [tuple(farm["farmer"])] + [tuple(h) for h in farm.get("hands", [])]
+    inventories = private.get("inventories") or [{}]
+    prices = (obs.get("market", {}) or {}).get("prices", {}) or {}
+
     tasks = _build_tasks(obs, farm, private, day, board_size)
-    actions = _assign(units, tasks, board_size)
+    actions = _assign(units, tasks, board_size, inventories, prices)
     market = _market_orders(obs, farm, private, day, hour)
 
     return {

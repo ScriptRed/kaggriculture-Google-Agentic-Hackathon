@@ -789,3 +789,75 @@ Task 3 entries above, decisively - `main` beats `v1` 100.0% with a
 Not revisiting this again - if a v0-vs-v1-specific question ever comes up,
 the answer is `python arena/run.py --compare v1-early-capital-discipline`,
 not a bespoke audit.
+
+### 2026-08-07  Branch 1 - implement DROP
+
+Hypothesis: harvested produce lands in the harvesting unit's own personal
+inventory, not the shed - `SELL` only ever reads the shed. We have never
+issued `DROP` (confirmed by grep and by the replay analysis two entries
+back), so everything harvested is unsellable until the automatic
+end-of-day sweep, and anything still in hand at the literal end of the
+game is permanently lost - it never reaches the bank at all.
+
+**First attempt was wrong and caught before it shipped.** Scored DROP as
+an unconditional pre-pass, decided before the tile-task scorer ever saw
+the board. It reintroduced `plants_weeded > 0` (4-20/game across 5 seeds)
+for the first time since the capital_reserve stall trap fix - a unit
+carrying inventory could get locked into a shed detour even when it was
+the only unit that could reach an urgent rescue-water task (score 100,
+dies that night) that same turn. `make test` didn't catch it (no test
+asserts `plants_weeded == 0` directly, only the activity floor), a direct
+`episode_metrics` check across 5 seeds did. Per the skill's own rule -
+nonzero `plants_weeded` is a bug, not a strategy trade-off - fixed before
+measuring anything.
+
+**Adopted design**: folded into `_assign`'s existing idle-unit fallback
+instead of a separate pre-pass. A unit only gets offered the DROP choice
+once the tile-task scorer has already decided it has nothing better to do
+this turn (nothing scored high enough to claim it) - so it can never
+preempt real work, in particular never a rescue-water task. A unit with
+scored work to do keeps carrying its harvest another turn; carrying it one
+turn longer costs nothing, missing a rescue task costs the whole plant.
+This answers the "every unit returns every trip, or designate a runner"
+question the prompt raised: neither, really - inventory is per-unit and
+non-transferable (no unit-to-unit handoff action exists), so there's no
+way to build a dedicated runner that collects *other* units' harvests; the
+harvesting unit is always the one that has to walk it in eventually, and
+the only real design lever is *when that's worth doing*, which turned out
+to be "only when otherwise idle," not a value threshold (tried a
+`drop_trip_value` threshold in the broken first attempt - unnecessary once
+DROP is correctly gated to genuinely idle turns, since an idle unit costs
+nothing to redirect regardless of what it's carrying).
+
+Verification: `make test` 95/95 green, `plants_weeded` and `animals_lost`
+both back to 0.000 across the 5 spot-check seeds and the full pool run.
+
+`--compare v2-capital-reserve-fix` (48 seeds, 96 episodes): **mean
++1,451.9, sd 770.4, 95% CI [+1295.7, +1608.0], paired t-test p<0.0001,
+Wilcoxon p<0.0001 (agree), win rate 92.7%.** Comfortably clears the Task C
+bar (95% CI excludes zero, both tests agree, point estimate far past the
+~50-coin floor).
+
+Realised revenue and idle inventory, measured directly (5 seeds, `starter`
+opponent, not the paired-differential seeds - a separate direct
+instrumentation of money and per-unit carried-inventory value every
+turn): mean approximate sell revenue per game **9,127 -> 11,062** (+21%).
+Mean idle (carried, not-yet-sellable) inventory value across the whole
+game barely moved (281 -> 239) - most inventory turns over quickly either
+way. The number that actually matters: **inventory value still in hand at
+the literal end of the game - money that never reached the bank at all -
+dropped from a mean of 2,691 to 176 (-93%)**. Before this fix, a
+meaningful fraction of every game's final harvest was simply thrown away
+by the clock; that's now almost entirely recovered.
+
+Verdict: ADOPTED.
+
+Notes: `DROP` fires 34-48 times per 720-turn game post-fix (down from 143
+in the broken pre-fix version that had no idle-only gating - most of those
+143 were detours that shouldn't have happened). Branch 2 (animal pipeline)
+starts next, separately, per the one-hypothesis-per-branch instruction -
+its `PICKUP`/`PLACE` logic will need to be careful not to let a
+carried-but-not-yet-placed animal get swept up by this DROP logic and
+dumped into the shed as a sellable item; `_inventory_value` already
+excludes `ANIMALS` keys defensively for exactly this reason, added before
+Branch 2 existed.
