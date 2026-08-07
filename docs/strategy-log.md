@@ -1229,3 +1229,83 @@ helper function the policy doesn't call yet.
 
 Verdict: ADOPTED (as a corrected model; not yet wired into `agent/`
 policy - that's the subject of the target-plan work this unblocks).
+
+---
+
+### 2026-08-07  Target production plan extracted (Task 2, analysis only)
+
+Hypothesis: barnyard-economist's ~190-200k route, cross-checked against
+kaito-v18/v21/v22 and live-meta and our own real replays, gives a
+consensus target to gap-analyze the current agent against.
+
+Finding: partial consensus, one real disagreement, and two of the five
+named sources turned out not to be usable the way the task assumed.
+Full writeup: `docs/target-plan.md`.
+
+- barnyard-economist's route table (verified against the notebook, which
+  turned out to have two more rows than the summary I was given: d06 and
+  dollar figures for d15/d21) is internally coherent and matches Task 1's
+  corrected economics mechanistically: melon bounded at 12 tiles and wound
+  down by day 24, not season-long; strawberry ramped in as melon's
+  zero-shop-demand ceiling is reached; 8 cow + 6 sheep built once by d12
+  and held, not scaled further. **But it's unexecuted** - every code cell
+  has `execution_count: None`, zero saved outputs, same for
+  kaito-v18-closed-loop. Every number from either is a claim, not a
+  measurement.
+- kaito-v18, despite being named "the exception" (closed-loop) in the task
+  brief, turns out to be a **hybrid**: only its market/sell/buy/hire layer
+  is closed-loop (a day-level expert gate switching on 0.6% of decisions);
+  its farmer/hand field-work trajectory is a single fixed recording,
+  identical across all four market experts until turn 632, and the
+  board-route gate that would have made the field layer reactive too ships
+  *disabled* in the published artifact. Its own evidence is win-rate
+  splits against frozen, non-reactive counterfactual replays (44/49 ->
+  40/53), never a bank total, never a live `env.run()` - same evidentiary
+  category as v13-r3 per the task's own credibility weighting.
+- kaito-v21 ("conditional memory") and kaito-v22 ("price impact") disclose
+  **no production-plan numbers at all** - both take someone else's
+  recorded route as a black box and only reorder its already-decided
+  market orders. v21 turned out to be a working example of exactly the
+  Task 5 "mirror" mechanism: 1-nearest-neighbor match against 30 public
+  route medoids, distance <= 48 gates reordering (not inventing) sells,
+  and its own ablation found that *inventing* new early sells from the
+  same opponent-prediction caused "performance collapse" - a real,
+  measured data point for Task 5, filed there.
+- **live-meta is not an independent source** - confirmed byte-identical to
+  `frontier-lab-high-score` (the notebook the task brief already flagged
+  as suspect) by md5sum. Its claimed modal top farm (8 cow + 6 sheep +
+  strawberry, no melon) matches barnyard-economist's steady state in
+  *shape*, which is worth something, but the specific numbers are
+  unverifiable from either copy (also unexecuted, also requires an
+  external dataset mount we don't have).
+- **Our own 7 real replays are the only executed, verified evidence in
+  this review**, and they partially disagree with barnyard-economist: our
+  single strongest real opponent (62,271 final bank) ran 13 animals and
+  **bought zero land**, contradicting the "always buy exactly 2 quadrants,
+  never the $4,000 one" claim. Flagged as a genuine open question in
+  `docs/target-plan.md`, not resolved by picking a side - it needs its own
+  arena experiment with land quantity as the sole variable. Separately,
+  real melon-heavy opponents (17-25 tiles, uncapped) scored well but below
+  both the animal-heavy winner and barnyard-economist's ceiling - consistent
+  with Task 1's finding that unbounded melon overproduces a near-zero-demand
+  channel, and with barnyard-economist's own bounded-then-pivot shape.
+
+Ranked gap vs current agent (`agent/main.py`), by what's actually measured:
+(1) we never plant melon or strawberry at all - `_pick_crop` only returns
+WHEAT or CARROT, true by direct code inspection and confirmed by every
+source regardless of credibility tier; (2) our animal target (7) is
+roughly half the real-replay winner's (13) and barnyard-economist's (14);
+(3) land timing/quantity is unresolved, not a settled target - our own
+replay evidence disagrees with barnyard-economist here; (4) hand count is
+flat (8) where every source says it should ramp, lowest-confidence item
+since we have no real-replay hand-count data point.
+
+Change: none to `agent/` - analysis only, per the task's explicit
+ordering (economics and target-plan settled before any production-plan
+code moves).
+
+Arena: not run - no `agent/` behavior changed.
+
+Verdict: ADOPTED (as the target-plan reference for the next branch; land
+quantity/timing explicitly carved out as unresolved pending its own
+experiment, not adopted from either source).
