@@ -18,3 +18,4 @@ replays/
 logs/
 *.replay.json
 prompts/
+notebooks/
