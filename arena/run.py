@@ -43,7 +43,14 @@ SEEDS = [
     996510, 635145, 964674, 929061, 59803, 563431, 241203, 717227, 702931,
     564425, 638423, 948091, 154341, 94953, 956778, 659543, 909170, 757581,
 ]
-DEFAULT_OPPONENTS = ["starter", "random_seeded", "v2-capital-reserve-fix"]
+DEFAULT_OPPONENTS = [
+    "starter", "random_seeded", "v2-capital-reserve-fix",
+    # Distinct-strategy pool, added after the self-play-echo-chamber risk
+    # flagged when the arena was designed became real (see
+    # docs/ladder-observations.md and docs/meta-analysis.md): every prior
+    # opponent above is our own lineage or a trivial baseline.
+    "animal-heavy", "melon-rush", "market-dumper",
+]
 
 
 def _git_info():

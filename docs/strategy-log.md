@@ -663,3 +663,78 @@ at n=12 could easily have missed or misread as noise. Also: a comment
 thread in `agent/main.py` now carries the history of what didn't work and
 why for this exact code path - worth checking before touching
 `_market_orders` step 3 again.
+
+### 2026-08-07  Expand the opponent pool with distinct strategies
+
+Hypothesis (from docs/meta-analysis.md and docs/ladder-observations.md):
+the opponent pool has been our own lineage (`v2-capital-reserve-fix`,
+descended from `v1`, descended from `v0`) plus two trivial baselines
+(`starter`, `random_seeded`) since the arena was designed - exactly the
+self-play-overfitting risk flagged at design time, now confirmed real by
+real ladder replays showing us losing 1-6 to actual opponents running
+strategies (full animal pipelines, melon-heavy watering) our pool has
+never once represented.
+
+**Added three self-contained opponents** (`arena/opponents/`, none import
+from `agent/`):
+
+- **`animal-heavy`** - builds multiple COOP/PASTURE structures, actually
+  completes the BUY_ANIMAL -> PICKUP -> PLACE -> FEED/CARE ->
+  COLLECT_FERTILIZER pipeline our own agent has never once executed (see
+  the previous entry), targeting 3 goose + 3 cow + 2 sheep. Needed two
+  iterations to stop losing animals to starvation: reactive feeding
+  (only fetch wheat once an animal is already visibly hungry) let them
+  escape faster than they could be re-fed; switched to proactive feeding
+  (carry wheat whenever any animal is owned at all, not only when one is
+  already hungry) and added a `BUY_PRODUCT WHEAT` backstop so the feed
+  supply doesn't depend entirely on a 4-tile wheat patch. After the fix:
+  full herd placed by day 6, zero animals lost for the rest of the game,
+  final bank ~52,000 on the seed used for iteration.
+- **`melon-rush`** - melons only, never misses a bonus-window water day
+  (age 6-12; the assignment discount that throttles distant low-value
+  tasks is explicitly bypassed for melon watering specifically), metered
+  post-harvest selling. Reaches ~40,000 on the seed used for iteration.
+- **`market-dumper`** - a plain wheat/carrot economy paired with two
+  things our own agent deliberately avoids: naive full-shed dumping every
+  turn (no price-impact floor, no batch cap - a real control on whether
+  metered selling actually matters) and adversarial targeting (watches
+  the opponent's visible tiles for near-harvest crops/animal products and
+  dumps any matching stock first, per the untested "adversarial angle" in
+  `docs/economics.md`). Weakest of the three by design (simple crop base,
+  and naive dumping costs the dumper itself revenue on glut-cursed goods,
+  exactly as `economics.md` predicts) but still soundly beats us.
+
+**Added to `DEFAULT_OPPONENTS`** alongside the existing pool (not a
+replacement - `starter`/`random_seeded`/`v2` stay, for the same reason the
+skill's anti-patterns list says not to drop them). Re-ran `make arena` on
+the full 48-seed pool, now 6 opponents / 576 episodes:
+
+| | win rate | mean bank diff (paired) | 95% CI | t-test | wilcoxon |
+|---|---|---|---|---|---|
+| starter | 65.6% | +81.0 | [-60.1, +222.1] | p=0.2575 | p=0.0418 (disagree - trust wilcoxon: real but small) |
+| random_seeded | 100.0% | +3,565.9 | [+3438.8, +3693.0] | p<0.0001 | p<0.0001 |
+| v2 (self-play) | 50.0% | +0.0 | [-13.6, +13.6] | p=1.0 | p=1.0 |
+| **animal-heavy** | **0.0%** | **-48,576.2** | [-49094.8, -48057.7] | p<0.0001 | p<0.0001 |
+| **melon-rush** | **0.0%** | **-36,972.9** | [-37160.6, -36785.3] | p<0.0001 | p<0.0001 |
+| **market-dumper** | **0.0%** | **-5,309.0** | [-5359.7, -5258.3] | p<0.0001 | p<0.0001 |
+
+**OVERALL WIN RATE: 35.9%** (576 episodes), down from 88.5% on the
+previous 3-opponent pool (Task D entry, same day). This is the expected
+and intended outcome, not a regression to chase - the previous 88.5%
+was measuring almost nothing but self-lineage and trivial baselines. The
+new number is lower and more honest.
+
+`plants_weeded` and `animals_lost` both **0.000 across all 576 episodes** -
+directly relevant to the still-open rescue-water-distance-exemption item
+from two sessions ago; see the next entry for the close-out.
+
+Verdict: ADOPTED (infrastructure - the pool itself, not a PARAMS/strategy
+change to `agent/main.py`, so there's no "regression" framing here; this
+entry establishes the new, harder baseline everything from here on is
+measured against). Next real strategy work should target the two
+highest-leverage, already-verified gaps from `docs/ladder-observations.md`:
+completing the animal pipeline (`BUILD_COOP`/`PASTURE`, `PICKUP`, `PLACE`)
+and issuing `DROP` after `HARVEST` - both are missing mechanics, not
+strategic disagreements, and both are now directly measurable against a
+real animal-heavy opponent in the pool instead of only against replay
+evidence we can't rerun.
