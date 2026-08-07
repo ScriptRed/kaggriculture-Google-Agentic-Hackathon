@@ -107,3 +107,186 @@ baseline wasn't just "leaving money on the table" on several seeds — it was
 outright stalling for the rest of the game after the day-0 cash crunch, which
 the win-rate number alone doesn't fully capture. Branch: `strat/early-capital-discipline`.
 Not yet merged to main or frozen as an opponent — pending user confirmation.
+
+Update 2026-08-07 (later same day): merged to main and frozen as
+`v1-early-capital-discipline` per user confirmation. **The 58.3% baseline
+number above is contaminated — see the "Failure modes" section below for the
+corrected, clean comparison.** Short version: a properly isolated v0 actually
+scores 68.8% overall / 37.5% vs starter, not 58.3%/16.7%. The relative
+improvement claimed here does not hold up against the clean baseline; v1 may
+be a regression on raw win rate despite fixing `test_agent_beats_pass` and
+cutting `plants_weeded` and `noop_rate`. Do not cite the 58.3%/62.5% numbers
+above as valid without reading that section first.
+
+---
+
+## Failure modes
+
+### 2026-08-07  Testing-methodology contamination of the v1 baseline
+
+**This corrects the "v0 baseline" arena numbers used in the
+early-capital-discipline entry above. Read this before trusting any
+comparison against that entry.**
+
+Task: investigate a claim from the previous session that "several v0
+baseline games silently stalled for the whole match after the day-0 cash
+crunch" (observed as `bank=3000` exactly, both seats, on seeds 89/97/103/
+113/127 vs `starter`, in that session's `make arena` baseline run).
+
+**Finding: the stall does not reproduce.** A clean, isolated copy of v0
+(`git show 1b11835:agent/main.py`, run via `arena/run.py --candidate
+<isolated path>` so nothing could touch the file mid-run) was re-run on the
+same 12-seed pool, both seats, vs `starter` and `random`:
+
+- Clean v0: **68.8% overall** (37.5% vs starter, 100% vs random), mean bank
+  3065, bank range 1875-3917. None of seeds 89/97/103/113/127 froze — e.g.
+  seed 89 nets 3411, seed 97 nets 3445.
+- This directly contradicts the previous session's reported 58.3% overall /
+  16.7% vs starter / several games flatlined at exactly 3000.
+
+**Root cause: I was editing `agent/main.py` in the working tree while a
+background `make arena` job's subprocesses were still reading that same file
+off disk.** In the previous session I launched the baseline arena run in the
+background, then immediately started branching and editing `PARAMS` in
+`agent/main.py` — including a throwaway experiment that set the effective
+seed-purchase reserve to 999999 (to isolate crop-only economics), followed by
+`git checkout -- agent/main.py` to revert, repeated several times, all while
+the arena subprocesses were still spinning up and executing episodes. Since
+`kaggle_environments` execs the agent file once when a given episode's
+subprocess starts, different episodes captured different, sometimes broken,
+transient states of the file — including at least one state where seed
+purchases were fully blocked, which is structurally capable of producing the
+observed flatline (see the mechanism below). I did not save any of the
+intermediate states, so I cannot name the exact commit that ran; I can only
+show that (a) genuine v0 does not do this, and (b) I was actively mutating
+the file during the exact window those episodes ran in. This is a testing-
+hygiene bug on my part, not a v0 defect. **Going forward: never run `make
+arena` (or anything that reads `agent/main.py` from a background job) while
+editing that file in the same working tree — use `--candidate` against an
+isolated copy, or a worktree, when a background measurement is in flight.**
+
+Consequence for the early-capital-discipline entry above: the "baseline"
+58.3%/16.7% numbers were measured against a mix of genuine v0 and
+contaminated episodes, not against v0 itself. The clean comparison is:
+
+| | overall | vs starter | vs random | mean bank | plants_weeded | peak_units |
+|---|---|---|---|---|---|---|
+| v0 (clean) | 68.8% | 37.5% | 100% | 3065 | 31.8 | 9.0 |
+| main (post-fix, clean) | 62.5%\* | 25.0% | 100% | 2591\*\* | 2.2 | 9.0 |
+
+\*main's 12-seed pool now includes `v1-early-capital-discipline` itself
+(added to `DEFAULT_OPPONENTS` when frozen), which is a mirror match against
+an identical agent and contributes a meaningless ~50% to the blended
+average; the starter/random-only overall (comparable to v0's number) is
+**62.5%** as well since random is 100% either way — recomputed directly:
+(25.0×24 + 100×24)/48 = 62.5%. \*\*mean bank across the starter+random legs
+only (72-episode run's blended mean was 2591 including the v1 mirror leg).
+
+**On a clean footing, v1 is worse than v0 on win rate** (62.5% vs 68.8%
+overall, 25.0% vs 37.5% vs starter) despite fixing the red test and cutting
+`plants_weeded` (31.8 → 2.2) and stabilizing `hires`/`peak_units`. This is
+the opposite conclusion from what got merged. I am not reverting unilaterally
+per standing instructions, but this needs a decision — see the note appended
+to the early-capital-discipline entry above, and task 3 (seed-variance audit)
+is now more consequential than originally scoped, since it's comparing
+against a baseline I have to re-derive, not one already on record.
+
+### The stall mechanism itself is real, and current main is *more* exposed to it than v0
+
+Independent of the contamination above, I stress-tested the causal chain
+predicted in this investigation: private `seeds` start at 0 for every crop
+with no free stock (env source, `kaggriculture.py:158`). If `BUY_SEED` never
+fires, `_pick_crop` still returns a crop name but `seeds.get(crop, 0)` is 0,
+so `_build_tasks`'s `if crop and seeds.get(crop, 0) > 0` is always false, no
+`PLANT` task is ever generated, and — once any already-planted crop has been
+harvested and cleared — `_build_tasks` returns `[]`. Every unit then falls
+into `_assign`'s "walk to shed" branch; since the farmer's default spawn and
+new hands both spawn at/near a shed tile, `_step_toward` returns `None`
+immediately and the action resolves to `PASS`. Money never moves again
+because hiring is the only other thing gated on cash, and it's now spent on
+units with nothing to do.
+
+Verified directly with `configuration={"startingMoney": ...}` overrides
+(seed 11 vs `pass`, 240 steps):
+
+| startingMoney | v0 worst 48-turn PASS% | v0 final bank | main worst 48-turn PASS% | main final bank |
+|---|---|---|---|---|
+| 50 | 100% | 50 (frozen from turn 0) | 100% | 50 (frozen from turn 0) |
+| 1000 | 61.5% | 514 (recovers) | **100%** | 670 (declining, not frozen at exactly start, but stuck for the full window I checked — day 0 through day 9) |
+| 1300 | 61.1% | 712 (recovers) | **100%** | 865 (same pattern) |
+| 3000 (normal) | 54.9% worst window | n/a | 65.5% worst window | n/a |
+
+At $50 both versions are fully and permanently dead (hire budget's
+`money - 50` floor blocks hiring, and money never grows). That's an extreme,
+not something the real game triggers (`startingMoney` is fixed at 3000 by
+configuration).
+
+The $1000-1300 rows are the important ones: **v0's seed-purchase reserve is
+an ad-hoc 200, but main's unified `capital_reserve` is 1200** (set in the
+early-capital-discipline fix). At $1000-1300 starting cash, v0 clears its
+$200+seed-cost bar comfortably and keeps buying seeds/planting/harvesting
+throughout — it recovers. Main never clears its $1200+seed-cost bar (money
+only goes down from there, since it keeps hiring 7 hands/day at ~$33/day
+using the *separate* `hand_budget_frac` gate, which is not tied to
+`capital_reserve`), so it never plants a single seed and burns what little
+cash it has on hands that have nothing to do. Traced turn-by-turn: main's
+money declines monotonically and mechanically by exactly the daily hire
+cost (1000 → 967 → 934 → ... → 670 by day 9), while every one of its 8
+units outputs literal `PASS` every single turn of every single day.
+
+**This did not trigger in either arena run this session** — v0's clean-run
+minimum bank was 1875, main's was 1380, both comfortably above the ~1320
+trap line — so it has not cost a game yet. But it is a real, not-yet-
+triggered latent fragility that the early-capital-discipline fix made
+*worse*, not better: it raised the seed-purchase reserve from 200 to 1200
+without also pausing hire spend when cash is scarce, narrowing the recovery
+margin roughly 6x. A mid-game cash squeeze (bad market timing, an
+aggressive opponent undercutting sale prices, a run of weeds) that would
+have been survivable on v0 is not guaranteed to be survivable on main.
+
+Answering the four original questions directly:
+
+- **(a) What did "stalled" mean?** It doesn't reproduce on v0 — see above.
+  The genuine mechanism (constructed via `startingMoney` stress test, not
+  observed in real arena play) is: every unit outputs literal `PASS` every
+  turn, farmer and hands alike, from the first turn cash-starvation begins.
+- **(b) Causal chain:** cash stuck below `capital_reserve` (main) or the
+  200 ad-hoc reserve (v0) with no crop already in the ground → `BUY_SEED`
+  never fires → `seeds[crop]` stays 0 → no `PLANT` tasks → (once existing
+  crops are cleared) `_build_tasks` returns `[]` → every unit's nearest
+  free-task search finds nothing → falls to the shed-walk branch → already
+  at the shed → `PASS` forever. Confirmed by direct per-turn trace, not
+  inferred from reading the code.
+- **(c) Impossible on main, or merely not triggered?** Neither, precisely —
+  **not triggered under the 3000-starting-money conditions we actually
+  play, and structurally *more* reachable on main than on v0** because of
+  the reserve increase. Be suspicious of any future PARAMS change that
+  raises `capital_reserve` further, or that decouples hire spend from
+  available cash even more.
+- **(d) Other routes into the same state?** Bank-near-zero mid-game is
+  confirmed real (above) and is the only one that produces a *permanent*
+  lock. The other three candidates were checked against the env source and
+  do not, on their own, cause a full stall: shed-at-cap just discards
+  overflow at end of day (`_drop_inventories_to_shed`) rather than blocking
+  earning; `HARVEST` has no shed-capacity check at the point of harvest
+  (`kaggriculture.py:432-459`) so "unharvestable because full" isn't a real
+  state; `animals_lost` reaching nonzero only removes tasks for that one
+  animal tile and doesn't touch crop income. Late-season `_pick_crop`
+  returning `None` (`days_left < 4`) is intentional and doesn't cause a
+  stall because already-planted crops still generate `WATER`/`HARVEST`
+  tasks normally in that window — it's expected reduced activity, not a
+  bug, and is why the regression test below runs the full 720 turns rather
+  than checking the tail in isolation.
+
+**Regression test added:** `tests/test_no_extended_stall` in
+`tests/test_invariants.py` — asserts no 48-turn (2-day) window in a normal
+720-turn, seed-11-vs-starter, $3000-starting episode is more than 90% PASS.
+Currently passes on both v0 (worst window 54.9%) and main (worst window
+65.5%) — it is a forward-looking guard, not a demonstration that either
+version currently fails it. I deliberately did *not* encode the $1000-1300
+stress scenario as a hard assertion in the test suite: doing so would fail
+on main right now and block task 2 under the user's stated ordering, and
+the fix for it (decouple hire spend from cash scarcity, or lower
+`capital_reserve`, or both) is a PARAMS/planner change that belongs in its
+own experiment, not folded into a diagnostic task. Flagging it here for a
+decision on priority rather than fixing it unasked.

@@ -45,3 +45,55 @@ def test_agent_beats_pass():
     mine = env.steps[-1][0]["observation"]["farms"][0]["money"]
     theirs = env.steps[-1][0]["observation"]["farms"][1]["money"]
     assert mine > theirs, f"lost to the do-nothing agent: {mine} vs {theirs}"
+
+
+def _unit_actions(step, seat):
+    a = step[seat].get("action") or {}
+    if not isinstance(a, dict):
+        return []
+    out = []
+    f = a.get("farmer")
+    if f:
+        out.append(f)
+    out.extend(a.get("hands") or [])
+    return out
+
+
+def test_no_extended_stall():
+    """Hard floor on activity: no 48-turn (2-day) window may be >90% PASS.
+
+    Guards the specific failure chain confirmed in docs/strategy-log.md
+    "Failure modes": private seeds start at 0 for every crop with no free
+    stock, so if BUY_SEED never fires (cash stuck below the purchase
+    reserve) _build_tasks stays empty forever and every unit PASSes from
+    its shed spawn point every turn, with no way back in. That state is a
+    silent, un-erroring ladder loss.
+
+    This does NOT reproduce under normal starting money on either v0 or
+    current main (both stay well under the 90% floor - see the log for
+    numbers) - it is a forward-looking regression guard, not evidence that
+    either version currently stalls in real play.
+    """
+    env = make("kaggriculture",
+               configuration={"episodeSteps": 720, "seed": 11}, debug=True)
+    env.run([AGENT, "starter"])
+    steps = env.steps
+
+    window = 48
+    pass_frac = []
+    for step in steps:
+        acts = _unit_actions(step, 0)
+        total = len(acts) or 1
+        n_pass = sum(1 for a in acts if not (isinstance(a, list) and a and a[0] != "PASS"))
+        pass_frac.append(n_pass / total)
+
+    worst, worst_at = 0.0, 0
+    for i in range(len(pass_frac) - window + 1):
+        frac = sum(pass_frac[i:i + window]) / window
+        if frac > worst:
+            worst, worst_at = frac, i
+
+    assert worst <= 0.90, (
+        f"activity floor breached: {worst:.0%} PASS across turns "
+        f"{worst_at}-{worst_at + window} (day {worst_at // 24})"
+    )
