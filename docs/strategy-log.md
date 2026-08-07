@@ -60,3 +60,50 @@ Verdict: BASELINE — worse than `starter`. Kept only as a floor to beat.
 - Buying NE early purely to stop wasting the daily hand spawn on a locked tile.
 - Late-season sell timing against the day-10 / day-20 town demand steps.
 - Adversarial dumping of whatever the opponent is about to harvest.
+
+---
+
+## 2026-08-07  early-capital-discipline
+Hypothesis: `test_agent_beats_pass` is red (375 vs 3,000 at step 240) because
+land, geese, and seed-buffer purchases each check their own small local
+reserve (200-800) independently. On day 0 all three fire in the same window —
+NE land (1000) + 4 geese (1200, bought one-per-hour until `goose_target`) +
+seed restocking (~500+) — draining the bank to ~200 before any harvest
+revenue exists. Debug traces (`KAGGRI_DEBUG` prints, not committed) confirmed
+this: baseline day-0 spend was land 1000 + hires 54 + geese 1200 + seed 540 =
+2794 out of 3000 starting cash.
+
+Change: replaced the three separate reserve constants
+(`land_buy_reserve: 800`, ad-hoc 600 for geese, ad-hoc 200 for seed top-ups)
+with one shared `capital_reserve: 1200` gate used by all three, plus two new
+gates — `land_buy_min_day: 10` and `goose_buy_min_day: 12` — so land and
+animals are only bought once the crop engine has had a third of the season to
+establish itself. Verified empirically before picking these numbers: a
+crop-only build (land and geese both disabled) already beats `pass` by day 10
+(3356 vs 3000); land bought as early as day 4 or day 6 still lost, because a
+freshly-unlocked quadrant pulls hands onto low-value PLANT tasks on empty
+tiles away from the already-productive NW harvest cycle, not just because of
+the 1000 coin outlay. Day 10 / day 12 was the first point that held up across
+seeds 11/23/37/41 with comfortable margin (final bank ~3350-3430 vs 3000).
+
+Arena (12 seeds x 2 opponents x 2 seats, 720 steps): **62.5%** overall (vs
+starter 25.0%, vs random 100%), mean bank 2871 — vs baseline (this session,
+same seeds/pool) **58.3%** overall (vs starter 16.7%, vs random 100%), mean
+bank 3130.
+Key metric deltas: `peak_units` 4.0 -> 9.0 (min 1 -> min 9 — every game now
+reaches full headcount; baseline had games where hiring silently stalled),
+`hires` 68.8 -> 239.8 (near the 240 theoretical max — hiring now happens
+every day instead of stalling out after the initial cash crunch),
+`quadrants` 1.375 -> 2.375 (every game now buys at least NE by day 30;
+baseline had games that never bought any land), `plants_weeded` 9.3 -> 2.5,
+`noop_rate` 0.714 -> 0.227. `animals_lost` stayed 0, no episodes errored.
+Mean bank went down (2871 vs 3130) but the ladder scores win/loss only, and
+win rate went up on both counted axes.
+Verdict: ADOPTED
+Notes: overall win-rate delta alone (+4.2pp) is under the +5pp noise bar, but
+vs-starter delta (+8.3pp) clears it, `test_agent_beats_pass` flips red->green,
+and the reliability metrics (`peak_units`, `hires`, `quadrants`) show the
+baseline wasn't just "leaving money on the table" on several seeds — it was
+outright stalling for the rest of the game after the day-0 cash crunch, which
+the win-rate number alone doesn't fully capture. Branch: `strat/early-capital-discipline`.
+Not yet merged to main or frozen as an opponent — pending user confirmation.
