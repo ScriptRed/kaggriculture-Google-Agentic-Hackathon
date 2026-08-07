@@ -290,3 +290,121 @@ the fix for it (decouple hire spend from cash scarcity, or lower
 `capital_reserve`, or both) is a PARAMS/planner change that belongs in its
 own experiment, not folded into a diagnostic task. Flagging it here for a
 decision on priority rather than fixing it unasked.
+
+### 2026-08-07  Arena determinism and noise-floor audit
+
+Prompted by the previous entry: v0 scored 58.3%/16.7% last session and
+68.8%/37.5% this session on the nominally same 12-seed, 2-opponent pool.
+Before trusting any number in this file, checked whether the arena is
+reproducible at all.
+
+**(c) Opponent pool drift, checked first as requested — ruled out.** Both
+conflicting runs used `arena: 48 episodes (12 seeds x 2 opponents x 2
+seats)` per their own log headers (still on disk), and `arena/run.py` at
+commit `b24133f` (current at the time of both runs) has
+`DEFAULT_OPPONENTS = ["starter", "random"]`, identical to v0's. `v1-early-
+capital-discipline` was not added to the pool until commit `c341f3f`, after
+both of those runs. Pool composition is not the explanation for that
+specific discrepancy — the testing-methodology contamination described in
+the entry above is.
+
+**(a) Same command twice, same commit (`cf51ee3`, current main), same
+seeds/pool, no code changes between — do NOT match bit-for-bit.**
+`vs starter`: all 24 episodes identical across both runs (same
+`final_bank`, `plants_weeded`, `hires`, `quadrants`, `idle_tile_rate`, down
+to the last unit). `vs random`: **all 24 episodes differ** — different
+`final_bank`, different `plants_weeded`, different `idle_tile_rate`, every
+single one. Win-rate summary happened to match this pair of runs (25.0% /
+100% / 62.5%) but that's not guaranteed — the per-episode banks are
+genuinely different runs, not the same run reported twice.
+
+**(b) Root cause, isolated and confirmed:**
+`kaggle_environments/envs/kaggriculture/kaggriculture.py:1014` —
+`random_agent`'s `rng = random.Random()` is constructed fresh, with no
+seed, on *every call* (every turn, not once per episode). Per the stdlib
+docs, `Random()` with no argument seeds itself from OS entropy, and does
+not consult the episode's configured seed or the global `random` module's
+seed state at all. This is in the installed `kaggle_environments` package,
+not our code — we cannot fix it without monkeypatching a third-party
+dependency.
+  - Confirmed the env's own seeded RNG (weed spawns, shop unlocks) is fine:
+    printed the `unlocked_shops` sequence for seed 11 across two full
+    720-turn runs — identical, turn for turn.
+  - Confirmed it isn't `ProcessPoolExecutor` / shared mutable state: reran
+    `vs random` with `--workers 1` (fully serial, no parallelism at all)
+    twice — still diverges (mean bank 3620 vs 3111 across 4 seeds). Given
+    `vs starter` is bit-identical *even when run via the same parallel
+    executor as vs random*, shared-state-across-workers is ruled out
+    directly — if it were real we'd see it on the starter leg too.
+  - So: **everything under our control (env RNG, `starter`, `pass`, our own
+    candidate agent) is fully, bit-for-bit deterministic given a fixed
+    seed. Only the built-in `random` opponent is not**, and by construction
+    (fresh entropy every turn), not just "not seeded once."
+  - This has not yet flipped a single win/loss outcome — `vs random` has
+    been 100% in every rerun across both sessions — so it hasn't corrupted
+    the ladder-relevant win/loss signal so far. But it does mean `vs
+    random`'s bank/diagnostic numbers are not reproducible, and — more
+    importantly — that `random` contributes **zero variance and zero
+    discriminating information** to the "overall" win-rate metric. It's a
+    constant 50%-of-the-pool ceiling that any competent agent clears every
+    time.
+
+**Structural consequence for the acceptance bar:** because `random` is
+statistically inert, blending it into "overall" mechanically halves the
+visible size of any real effect that exists in the `vs starter` leg (a
+-12.5pp swing vs starter shows up as only -6.25pp in "overall" purely
+because half the pool contributes zero variance either way). The skill's
++5pp-on-overall bar was already too small relative to noise before this;
+diluting the signal with an uninformative opponent makes it worse.
+
+**Standard error, computed from real per-seed data (not assumed):**
+using the empirical variance of per-seed `vs starter` scores (each seed's
+result averaged across both seat-swapped episodes, so seed-level not
+episode-level, correcting for the swap-pair correlation the naive
+i.i.d.-episode calculation ignores):
+
+| | vs-starter win rate | seed-level SE | naive episode-level SE (n=24, ignores swap correlation) |
+|---|---|---|---|
+| main (post-fix) | 25.0% (6/24) | **9.7pp** | 8.8pp |
+| v0 (clean) | 37.5% (9/24) | **12.5pp** | 9.9pp |
+
+On the blended "overall" metric (random contributes ~0 variance, exactly
+half the episode weight): SE(overall) ≈ SE(vs-starter)/2 ≈ **4.8-6.3pp**.
+
+**Direct answers:**
+- **Is the arena deterministic given fixed seeds and a fixed pool? No** —
+  specifically because of the built-in `random` opponent's per-turn
+  unseeded RNG. Everything else (env, `starter`, `pass`, our own agent) is
+  fully deterministic, confirmed directly, not assumed.
+- **Can it be made deterministic?** Not without patching vendored code we
+  don't own. Recommendation instead: stop treating `vs random` as a
+  contributor to the headline number. Keep it only as a sanity floor (it
+  should always be ~100%; if it's ever not, that's a real bug worth
+  investigating), and judge strategy changes on `vs starter` (and future
+  genuinely-distinct, deterministic opponents) instead of the blended
+  "overall" figure.
+- **Is the noise floor bigger than the +5pp bar? Yes**, on both the
+  vs-starter leg (9.7-12.5pp SE) and the diluted overall metric it's
+  supposed to gate (4.8-6.3pp SE, i.e. the bar is roughly *one* standard
+  error, not several). A +5pp "overall" result is not distinguishable from
+  noise at any reasonable confidence level as currently measured.
+- **Seed count needed:** to get SE down to 5pp (still only ~68% one-sided
+  confidence — weak parity with the *existing* bar, not a fix) needs
+  **~75 seeds** on the vs-starter leg. To get the bar to mean roughly what
+  "+5pp = real" implies it means (SE ≈ 2.5pp, bar ≈ 2×SE) needs **~300
+  seeds**. Neither number is currently in `arena/run.py`'s `SEEDS` list
+  (12 seeds). Not changed here — the skill explicitly forbids editing
+  `SEEDS` without invalidating every prior entry, and that decision belongs
+  to the user, not to me mid-audit.
+
+**Retroactive implication:** the -6.3pp (overall) / -12.5pp (vs starter)
+gap between v1 and clean v0 reported in the previous entry is *larger* than
+1 SE on vs-starter (12.5pp) but not by much, and well under the ~2×SE a
+normal significance bar would want. **I should not have called it "v1 is
+worse than v0" as confidently as I did — the honest statement is "the two
+are not distinguishable from this sample; the point estimate favors v0 but
+the gap is within noise."** That correction applies to my own prior report,
+not just to the original merge decision.
+
+**No code, PARAMS, or agent logic changed in this entry** — diagnostic
+only, per instruction.
