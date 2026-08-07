@@ -183,3 +183,125 @@ concrete code changes with an unambiguous mechanism behind them, and both
 are more immediately fixable than "grow an animal empire." The animal-
 economy gap (cow/sheep, multi-pasture, CARE-bonus compounding) is the
 bigger strategic gap and the natural target for Task 3's opponent design.
+
+---
+
+## 6. The mirror opportunity (Task 5 - assessment only, no code)
+
+**Question:** a large share of the ladder runs the same published open-loop
+recording (see `docs/architecture-notes.md`). It can't react to anything,
+its sell schedule is fixed and knowable step-by-step, and we can see the
+opponent's tiles. Can we detect a known route from public state, and what
+is the value of selling premium goods one turn ahead of a known dump?
+
+### It's not hypothetical - it's already built, twice, and it's already measured live
+
+`barnyard-economist` (a live-engine-verified fork of the `v22 price-impact`
+route, itself built on `Kaito v21.1`'s recorded trajectory - see
+`docs/target-plan.md`) ran the exact mirror matchup and reported it
+straight: two copies of the same route playing each other **tie dead at
+102,145 each**, "because both play the same route into the same market."
+Contrast with the same agent's other live results: **194,871 / 201,932**
+vs. the built-in `starter`, **150,939** vs. a public "Frontier Lab" agent,
+**160,361** vs. "Night Harvest / Blackclaw", **120,864-142,107** vs. "a
+tuned closed-loop policy agent." The mirror matchup is its *worst* live
+result by a wide margin - not a loss (both score identically, so it's a
+draw, not a defeat), but the crushing margin the route gets against
+everyone else evaporates completely. Its own words: "as more copies enter
+the ladder, they increasingly crash each other's prices, and the
+artifact's edge decays without anyone touching it" - exactly the brief's
+claim, now with a real live-engine number behind it rather than a
+notebook's assertion.
+
+**Two separate public notebooks already implement detection-and-exploit,
+independently, with different designs:**
+
+- **`v13-r3`** (the brief's example): a *near-mirror gate* comparing public
+  crop/animal/structure/hand/`unlocked_quadrants` counts; if clone distance
+  `<= 6`, it applies a bounded one-turn premium `SELL` shift (capped at 30
+  units, `STRAWBERRY`/`MELON`/`MILK`/`WOOL` only, turns 120-680) with
+  repayment on the following turn so the two-turn quantity is conserved.
+  Narrow and reversible by design.
+- **`kaito-v21` ("conditional memory")** - not named as a mirror mechanism
+  in the brief, but that is exactly what it is: a full **1-nearest-neighbor
+  opponent-route detector** against 30 stored public medoids (signatures
+  built from hand count, unlocked quadrants, crop/animal/pasture/coop
+  counts, weed count weighted 0.25, actor positions). Below a distance
+  threshold (`<= 48`), it predicts the opponent's future `SELL` set and
+  **reorders its own already-planned sells** to go first when they collide
+  with a predicted opponent sell - it does not invent new sells. This
+  matters: an earlier prototype *did* invent new early sells from the same
+  prediction, and its own ablation reports "performance collapse" at
+  roughly 28 preemptions/game. Two independent notebooks (v13-r3's
+  front-insert-vs-append finding, v21's invent-vs-reorder finding) converge
+  on the same shape of lesson: **react by reordering what you already
+  decided to do, never by fabricating new actions from a prediction.**
+
+**Detection itself is feasible with fields we already receive.** Both
+implementations use only public observation - `obs["farms"][opponent]`
+(tiles, hands, unlocked quadrants) and `obs["market"]` - nothing hidden.
+Our own `obs` already exposes everything both mechanisms need.
+
+**But it decays, and that cost is measured too.** `v22`'s own text reports
+that `v21`'s mirror threshold "did not gradually lose because its mirror
+threshold became slightly wrong" - it fell to 1/46 after the meta drifted,
+and needed a full route-refresh (`v21.1`) to recover. A signature library
+built from today's public notebooks needs upkeep as the field forks and
+mutates; it is not a one-time build.
+
+### Estimated coin value of "sell one turn ahead of a known dump"
+
+Computed directly from `agent/constants.py::sale_proceeds` (the same price
+model the env uses), for a plausible dump size per product (`their_dump`
+chosen near what a mature holding of each item looks like in
+`docs/target-plan.md`'s route, e.g. 42 strawberry at the d15-d21 plateau)
+against a modest 10-unit position of our own:
+
+| Item | We hold | Their dump | Sell before | Sell after their dump | Edge | Edge/unit |
+|---|---:|---:|---:|---:|---:|---:|
+| **STRAWBERRY** | 10 | 42 | $1,113 | $308 | **$805** | **$80.5** |
+| MILK | 10 | 18 | $1,506 | $1,128 | $378 | $37.8 |
+| WOOL | 10 | 12 | $1,983 | $1,837 | $146 | $14.6 |
+| MELON | 10 | 12 | $2,498 | $2,472 | $26 | $2.6 |
+| WHEAT | 10 | 35 | $237 | $220 | $17 | $1.7 |
+
+Strawberry towers over everything else here - consistent with Task 1's
+finding that it sits at the top of the sustainable-revenue ranking *and*
+has one of the steepest glut curves (`linear`, `above_target 1.60`), so
+timing around it is worth roughly **4-6x** any other single product.
+Melon and wheat are barely worth the mechanism at this dump size - melon's
+curve is quadratic but only bites hard much further from equilibrium than
+a 12-unit dump reaches (consistent with the ~158-unit-to-floor figure in
+`docs/economics.md`), and wheat is glut-resistant by design.
+
+### Why this is worth ~nothing to us right now, concretely
+
+The task brief's framing - "worth nothing while we are at 3,000" - holds up
+under this analysis, for two compounding reasons, not just one:
+
+1. **We hold none of the product that matters most.** The $80/unit edge is
+   on strawberry, and Task 2's gap analysis already established
+   `_pick_crop` never plants strawberry at all. A mechanism that pays out
+   on inventory we don't have pays us nothing.
+2. **Our own banks (4,000-20,000 in the arena's own opponent pool, per
+   Task 4's numbers) are an order of magnitude below the route family's
+   live results (100K-200K).** Repositioning a 10-unit sale by one turn is
+   real money in absolute terms ($805 for strawberry) but small relative
+   to the gap Task 2 is about closing - and irrelevant if we don't survive
+   to hold a meaningful premium-goods position in the first place.
+
+There's also a coverage question this analysis can't answer from here: we
+don't have ladder telemetry on what fraction of opponents at our current
+rating actually run this specific route family vs. something else
+entirely - `docs/ladder-observations.md`'s 7 real replays show one
+animal-heavy winner and two melon-heavy runners-up, not a recording match
+to barnyard-economist's shape (see `docs/target-plan.md`). Building a
+detector tuned to a route family we haven't confirmed we actually face
+would be optimizing for an assumption, not a measurement.
+
+**Recommendation, unchanged from the brief's own framing and now with
+numbers behind it: do not implement.** Revisit once Task 2's production
+gaps are closed and we're actually holding strawberry/premium-goods
+inventory worth repositioning - and even then, build it as v13-r3 and v21
+both converged on independently: narrow, reorder-only, gated tightly, never
+inventing new sells from a prediction.
