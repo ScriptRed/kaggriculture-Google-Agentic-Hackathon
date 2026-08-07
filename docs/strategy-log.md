@@ -1095,3 +1095,77 @@ not silently allowed - removing it from that set is the acceptance bar
 for whoever picks it up.
 
 Verdict: ADOPTED.
+
+### 2026-08-07  Re-baseline against the full pool, and what's next
+
+Full 6-opponent pool, 48 seeds, both seats (576 episodes), current agent
+(commit `6f383eb`, Branch 1 + Branch 2 both landed):
+
+```
+vs starter                 100.0%  mean +10,474.3  95% CI [+10,016.4, +10,932.3]
+vs random_seeded           100.0%  mean +14,680.6  95% CI [+14,245.6, +15,115.5]
+vs v2-capital-reserve-fix  100.0%  mean  +3,726.3  95% CI  [+3,213.5, +4,239.0]
+vs animal-heavy              0.0%  mean -41,586.4  95% CI [-42,230.5,-40,942.3]
+vs melon-rush                 0.0%  mean -26,014.6  95% CI [-26,464.1,-25,565.0]
+vs market-dumper              4.2%  mean  -3,945.6  95% CI  [-4,309.0,-3,582.3]
+
+OVERALL WIN RATE  50.7%  (576 episodes)
+plants_weeded  0.087 (mean)   animals_lost  5.191 (mean)
+```
+
+We beat every opponent in our own lineage and the trivial baselines at
+100%, and lose decisively to all three distinct-strategy opponents. That
+split is the whole story: our own iteration has been strictly improving
+against itself, but the distinct-strategy pool exists precisely because
+self-play is an echo chamber (see `docs/ladder-observations.md`), and it's
+doing its job - three real, large, quantified gaps, not vague ones.
+
+Ranked by what the data says, not the old pre-Branch-1/2 backlog:
+
+1. **We have never planted MELON.** `crop_early`/`crop_main` are WHEAT and
+   CARROT; `melon-rush` beats us by -26,014 mean, built entirely around
+   melon's bonus-window watering discipline. `melon-rush`'s own docstring
+   (and independently, `docs/meta-analysis.md`) puts melon profit/tile-day
+   at ~118 versus ~22-28 for wheat/carrot/strawberry - a 4-5x multiplier
+   we are leaving entirely on the table. `CROPS["MELON"]` is already in
+   `constants.py` (`first_yield_day: 10, max_yield_day: 12, max_yield: 6,
+   seed: 80`), the bonus-window watering machinery already exists and is
+   crop-agnostic (`bonus_window`/`harvest_age` in `constants.py` already
+   handle it correctly for any one-time crop) - this is a `PARAMS`/
+   `_pick_crop` change plus enough seed-buying and hand capacity to keep
+   melon watered on the correct days, not new mechanics. Likely the single
+   highest-leverage next branch given the size of the gap and how little
+   new plumbing it needs. Watch the $1-floor warning already in CLAUDE.md
+   (melon hits it fast - don't dump; drip-feed) and remember melon caps at
+   6 *without* fertilizer, so `fert_reserve` shouldn't be spent on it.
+
+2. **`animal-heavy` commits far more of its 9 units to animal husbandry
+   than we do.** Branch 2 made the pipeline work and closed part of the
+   raw bank gap (4,963 -> 9,234, +86%, see that entry) without flipping
+   any game - `animal-heavy` ignores crops almost entirely, we run a
+   mixed crop/animal economy, and mixed loses to specialized here.
+   Whether the right answer is a heavier animal allocation, or whether
+   melon (above) is simply the better use of the same scarce action
+   budget, is an open question this branch's data doesn't answer by
+   itself - measure both before committing capital-allocation params
+   further.
+
+3. **`market-dumper`'s adversarial targeting** (watches our visible tiles
+   for crops nearing max yield and dumps its own stock of that item first,
+   crashing the price to $1 before we can sell - see its docstring and
+   `docs/economics.md`) is a real, cheap sabotage vector we currently have
+   no defense against: we sell price-impact-aware against *our own*
+   selling pressure, not against an opponent actively pre-crashing a
+   price we're about to depend on. Smallest of the three gaps in absolute
+   terms (-3,945 vs -26,014/-41,586) but the only one that's actively
+   adversarial rather than just a different allocation - worth a cheap
+   mitigation (e.g. sell mature stock sooner instead of waiting for a
+   price recovery that an adversarial dumper will keep denying) even if
+   full defense isn't.
+
+Not proposing to attack all three at once - "one hypothesis per branch"
+still applies. Melon (#1) is the recommended next branch: largest gap,
+least new plumbing, and unlike #2 it doesn't require re-litigating the
+animal-target tuning from Branch 2 before there's data to justify it.
+
+No verdict - this entry is a measurement and a proposal, not a change.
