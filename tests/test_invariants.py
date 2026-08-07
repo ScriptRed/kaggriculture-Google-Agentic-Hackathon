@@ -138,3 +138,59 @@ def test_no_extended_stall_under_cash_pressure(starting_money):
         f"startingMoney={starting_money}: activity floor breached, "
         f"{worst:.0%} PASS across turns {worst_at}-{worst_at + 48}"
     )
+
+
+# Every verb the env recognises for a unit action (kaggriculture.py's op ==
+# dispatch, farmer/hand side) and for a market order (same file, the
+# HIRE/BUY_LAND/SELL/BUY_*/PLACE-shed-path branch). DROP and the whole
+# BUY_ANIMAL/BUILD_COOP/BUILD_PASTURE/PICKUP/PLACE chain went unimplemented
+# for most of this project with nothing catching it - `make test` stayed
+# green throughout because nothing asserted these verbs were ever issued,
+# only that *some* non-PASS action happened (test_agent_actually_acts) and
+# that the agent didn't stall (test_no_extended_stall). Movement
+# (NORTH/SOUTH/EAST/WEST) and PASS are excluded: trivially exercised by
+# every episode, not interesting to track here.
+UNIT_VERBS = {
+    "PLANT", "WATER", "HARVEST", "DIG", "DROP", "PICKUP", "PLACE",
+    "BUILD_COOP", "BUILD_PASTURE", "FEED", "CARE", "COLLECT_FERTILIZER",
+    "FERTILIZE",
+}
+MARKET_VERBS = {"HIRE", "BUY_LAND", "BUY_SEED", "BUY_PRODUCT", "BUY_ANIMAL", "SELL"}
+
+# Verbs known to be unexercised right now, tracked as a real gap rather than
+# silently allowed to regress further - see docs/strategy-log.md. Remove an
+# entry here the same commit that makes it fire.
+KNOWN_UNCOVERED = {"FERTILIZE"}
+
+
+def test_every_action_verb_is_exercised():
+    """Every verb in the action space must be issued at least once across a
+    full game - the class of test that would have caught DROP and the
+    BUILD_COOP/PICKUP/PLACE chain going unimplemented (see the Branch 1/
+    Branch 2 strategy-log entries). A verb that's never issued is either
+    dead code or, as those two were, a mechanic silently worth thousands of
+    coins that nothing ever exercises.
+    """
+    env = make("kaggriculture",
+               configuration={"episodeSteps": 720, "seed": 11}, debug=True)
+    env.run([AGENT, "starter"])
+
+    seen_unit, seen_market = set(), set()
+    for step in env.steps:
+        for act in _unit_actions(step, 0):
+            if isinstance(act, list) and act:
+                seen_unit.add(act[0])
+        action = step[0].get("action") or {}
+        if isinstance(action, dict):
+            for order in action.get("market") or []:
+                if isinstance(order, list) and order:
+                    seen_market.add(order[0])
+
+    missing = (UNIT_VERBS - seen_unit - KNOWN_UNCOVERED) | (MARKET_VERBS - seen_market)
+    assert not missing, f"action verbs never issued in a full game: {sorted(missing)}"
+
+    stale = KNOWN_UNCOVERED & (seen_unit | seen_market)
+    assert not stale, (
+        f"{sorted(stale)} now fires - remove from KNOWN_UNCOVERED "
+        "instead of leaving it excused"
+    )

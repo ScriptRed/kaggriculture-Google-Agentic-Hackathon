@@ -861,3 +861,237 @@ carried-but-not-yet-placed animal get swept up by this DROP logic and
 dumped into the shed as a sellable item; `_inventory_value` already
 excludes `ANIMALS` keys defensively for exactly this reason, added before
 Branch 2 existed.
+
+### 2026-08-07  Branch 2 - implement the animal pipeline
+
+Hypothesis: `BUY_ANIMAL` only ever reaches the shed. The full chain is
+`BUILD_COOP`/`BUILD_PASTURE` on an empty tile, `PICKUP` the animal out of
+the shed, then `PLACE` while standing on the matching empty structure -
+none of which we had ever issued, so no animal we've ever bought has
+produced anything. Confirmed by grep before touching any code.
+
+**Four separate bugs, found one at a time as each fix exposed the next.**
+Each was caught by direct instrumentation (stepping a live episode and
+inspecting board state), not by `make test` - see the "missing test class"
+note below.
+
+1. **`BUILD_COOP`/`BUILD_PASTURE` never fired at all.** First version
+   scored BUILD only when no crop was available to plant - almost never
+   true, since seed-buying keeps a standing buffer. Confirmed empirically:
+   0 structures built over a full 30-day game with 6+ animals sitting
+   bought-and-unplaced in the shed the whole time. Fixed by scoring BUILD
+   (55) directly above PLANT (40) so both compete for the same tile
+   through the existing greedy scorer, instead of BUILD being subordinate.
+
+2. **`_animal_deficit` (the buy-decision) double-counted empty
+   structures.** Its "have" calculation included `len(_empty_structures(...))`,
+   so once shed stock alone matched target it read as deficit-zero and
+   suppressed BUILD too (BUILD was, at that point, still driven by the same
+   function) even with zero actual empty structures on the board. Fixed by
+   splitting into two functions: `_animal_deficit` (buy - board + shed
+   only) and `_structure_needed` (build - shed-unplaced vs
+   empty-structures, grouped by structure since COW and SHEEP share
+   PASTURE).
+
+3. **The real blocker: `PLACE` tasks were never generated for a freshly
+   built structure at all.** `BUILD_COOP` writes `{"kind": "COOP"}` -
+   confirmed against `kaggriculture.py:479-488` - with no `"animal"` key
+   present, not `"animal": None`. The tile-scoring loop's guard was
+   `if "animal" in t:`, which never matches a key that doesn't exist, so
+   an empty COOP/PASTURE was invisible to the task generator even once it
+   existed on the board. Fixed the guard to check `kind in ("COOP",
+   "PASTURE")` instead - matching what `_empty_structures` already did
+   correctly, which is what made this take a while to find: the "obvious"
+   suspect (`_structure_needed` returning `None`) turned out to be
+   *correct* behaviour (there were already 8 empty COOPs against 6 shed
+   geese, so no more building was needed) - the actual bug was one level
+   up, in code that had looked fine on inspection.
+
+4. **Even with PLACE tasks existing, nothing ever issued `PICKUP` for an
+   animal.** The only `PICKUP` task in the codebase was the emergency-wheat
+   one from Branch 1. Added animal-PICKUP generation: for each animal kind,
+   fetch up to (open structure slots minus animals already in transit)
+   from the shed, one `PICKUP` task per distinct shed tile so at most that
+   many units get pulled onto the job.
+
+**Fifth bug, found only after animals started actually appearing on the
+board:** `_animal_deficit`'s "have" count (board + shed) doesn't see an
+animal between `PICKUP` and `PLACE` - the instant PICKUP fires, the shed
+count drops to 0, but the board count doesn't rise until PLACE completes
+a turn or more later. During that gap the deficit function saw a hole and
+bought again, repeatedly, while transit lag kept resetting the hole faster
+than purchases could close it - confirmed directly: COW target 3 reached 6
+placed simultaneously, SHEEP target 2 reached 4, both mid-buying-window
+before settling. Fixed by counting carried-but-unplaced animals (summed
+across all unit inventories) into "have" as well.
+
+**Feed supply chain, the second half of the prompt's ask.** With
+BUILD/PICKUP/PLACE all working, `animals_lost` (animal escapes,
+`consecutive_unfed >= 2`) came in at 15-30 per game at the original
+`{GOOSE:6, COW:3, SHEEP:2}` target - traced directly to two compounding
+issues:
+
+- The wheat-pickup task (inherited from Branch 1's emergency-feed logic)
+  fetched a flat `qty=2` regardless of herd size - fine for one animal,
+  useless for eight. Confirmed directly: 8 shed WHEAT sitting next to 8
+  simultaneously-unfed animals, all day, because the flat fetch only ever
+  restocked enough for one. Fixed to scale the fetch to actual
+  `feed_needed` (count of pending FEED tasks) net of wheat already
+  carried.
+- Offering that scaled pickup at all 4 shed tiles (to parallelise feeding
+  a scattered herd) regressed `plants_weeded` from 0 to 1-5/game across 5
+  spot-check seeds: at urgency 100 it ties WATER-rescue for the same
+  units, and 4 slots pulled too many off rescue-water. Reverted to 2
+  runners, which held `plants_weeded == 0` in the same spot check.
+- Traced one specific escape directly (seed 11, day 11-12, a GOOSE): one
+  carrier fed 2 of 3 geese that day and never reached the third before
+  day-end. The task scheduler is memoryless and greedy per-turn - it has
+  no notion of "finish the round I started" - so a wheat-carrying unit can
+  get diverted mid-round by a closer HARVEST and simply run out of day.
+  That's a structural property of this scheduler shape, not a one-line
+  bug; a real fix would need task commitment across turns, out of scope
+  for this branch.
+
+Given that structural limit, retuned `animal_target` down from
+`{GOOSE:6, COW:3, SHEEP:2}` (11 animals) to `{GOOSE:4, COW:2, SHEEP:1}` (7)
+to keep herd size within what 1-2 dedicated feeders can actually service
+in a day. Cut `animals_lost` from a 15-30/game range to a pool mean of
+**2.958** (min 0, max 10). Also bumped FEED's non-urgent baseline score
+from 65 to 82 (still below rescue-tier 100) so a wheat-carrying unit
+reliably continues its feeding round instead of losing every tie to
+routine harvest - this by itself was a small, inconsistent help; the herd
+resize did the actual work.
+
+**Sixth bug, unrelated to animals but only started costing anything once
+Branch 2 added enough daily-recurring high-priority chores to crowd it
+out: one-time crops have a hard lifespan deadline.** A pool audit of
+`plants_weeded` across all 48 seeds (not just spot checks - the Branch 1
+entry's "0.000 across the pool" claim turned out to only ever have been
+checked on 5 spot-check seeds plus the aggregate mean, which rounds small
+nonzero counts to `0.000` at 3 decimals) found 3 seeds with 1-5 weeded
+plants each. Traced directly: not watering neglect at all -
+`kaggriculture.py`'s `_decay_plants` is a second, separate mechanism -
+every one-time crop gets an absolute `max_lifespan_step` set at planting
+(`(planted_day + max_yield_day + 1) * turns_per_day`), and once the
+current step passes it, the tile loses a yield unit every 2 turns until
+it converts to `WEED` - same visible tile-kind transition as watering
+neglect, same `plants_weeded` counter, completely different cause. Worse:
+`harvest_age`'s own fallback (crop that never reaches capped yield) lands
+HARVEST-eligibility onset within about a day of that deadline *by
+construction* for crops like CARROT, so there was never much slack to
+begin with - confirmed directly (seed 73, a CARROT became harvest-eligible
+and hit its lifespan cutoff the same in-game day, never reached in time).
+Branch 2's extra daily load (FEED, animal PICKUP/PLACE, all competing at
+comparable priority) was enough to occasionally starve that already-thin
+margin.
+
+Fixed by escalating one-time-crop HARVEST to rescue-tier (100, same as
+WATER-rescue) once within a few turns of `max_lifespan_step`. Buffer size
+mattered a lot and was not obvious: tried 24 turns (1 day) first - since
+eligibility onset already sits within about a day of the deadline for
+many crops, this promoted most *routine* end-of-life harvesting to
+rescue-tier for its whole eligible window, not just genuine last-minute
+risk, and cost **-1,806 mean paired-diff coins vs v2** (win rate dropped
+100% -> 96.9%) for a problem worth a few dozen coins a game. Tried 12
+turns next, expecting a smaller version of the same trade: instead it was
+*worse* than 6 on `plants_weeded` itself (6 of 48 pool seeds vs v2 hit
+nonzero, up from 0) - a wider rescue-tier window raises contention density
+at score 100 across the board, so it can cost a *different* harvest
+elsewhere in the same now-more-crowded turn. Settled on 6 turns (closing
+quarter-day only), which recovered essentially all of the lost paired
+differential (see below) and eliminated `plants_weeded` against the
+primary pool entirely. This is a real example of "report regressions as
+prominently as wins" and "measure, don't assume" - the first fix looked
+obviously correct and cost the most; the second fix looked like a
+reasonable compromise and made the specific metric it was targeting worse.
+
+**Residual, disclosed rather than chased further:** against `animal-heavy`
+specifically (not the primary `v2` pool), 2 of 48 seeds still show
+`plants_weeded = 2` each even at buffer=6 - same lifespan-decay mechanism,
+traced directly. Widening the buffer made the primary-pool number worse
+(see above) without reliably fixing this one, which is direct evidence
+this is an inherent contention trade-off of the greedy per-turn scheduler
+under a specific opponent's market/timing pressure, not a bug a scalar
+knob fully closes. Not fixed further this branch - flagged here instead
+of silently accepted.
+
+**`animals_lost` is not zero and is not expected to reach zero under this
+scheduler.** The log's own stated rule (`plants_weeded > 0` or
+`animals_lost > 0` is a bug, not a strategy) is being knowingly not met
+for `animals_lost`: pool mean 2.958 (min 0, max 10) vs `v2`, mean 6.896
+vs `animal-heavy`. Unlike `plants_weeded` (now 0 against the primary pool,
+a genuine invariant restored), animal escapes are a direct, measured
+consequence of the memoryless per-turn scheduler documented above, and the
+herd-size retune already traded most of the avoidable loss away in
+exchange for enough action-budget headroom to keep watering and harvesting
+on schedule. The alternative - not buying animals at all - trivially
+satisfies the stated rule while giving up the entire animal income
+stream, which the numbers below say is not the right trade. Recorded here
+as a deliberate, quantified exception, not an oversight.
+
+Verification: `make test` 96/96 green (95 prior + the new action-verb
+coverage test, see below). `plants_weeded == 0.000` across the full
+48-seed pool vs `v2-capital-reserve-fix` (0 bad seeds out of 48, direct
+per-seed audit, not just the aggregate mean).
+
+`--compare v2-capital-reserve-fix` (48 seeds, 96 episodes): **mean
++3,726.3, sd 2,530.6, 95% CI [+3,213.5, +4,239.0], paired t-test p<0.0001,
+Wilcoxon p<0.0001 (agree), win rate 100.0%.** Comfortably clears the Task
+C bar.
+
+Head-to-head vs `animal-heavy` (the opponent this branch exists to close
+the gap against): still **0% win rate**, mean bank diff **-41,586** (95%
+CI [-42,230, -40,942], both tests agree, animal-heavy still dominant) -
+no win-rate change from before this branch. But a real, measured
+improvement underneath the unchanged headline number: mean bank vs this
+specific opponent went from **4,963 -> 9,234** (own-bank comparison,
+Branch-1-only vs current, same 48-seed pool, +86%), closing about 12% of
+the raw bank gap. `animal-heavy` itself runs the full pipeline (built
+purpose-built to test this exact gap - see its docstring) and commits far
+more of its 9 units to animal husbandry than our mixed crop/animal
+strategy does; matching it head-to-head would need a much more
+animal-weighted allocation than this branch's scope, not just a working
+pipeline. Candidate for the next branch.
+
+Verdict: ADOPTED (with disclosed residuals: `animals_lost` not zero, a
+tiny `plants_weeded` residual vs `animal-heavy` specifically).
+
+### 2026-08-07  Missing test class: action-verb coverage
+
+The prompt asked directly: how did two mechanics this large (DROP, the
+whole animal pipeline) go unimplemented for this long without any test
+catching it, and is there a test class that would have caught it?
+
+Yes. Every prior test either checked that *some* non-PASS action happened
+(`test_agent_actually_acts`) or that the agent didn't stall
+(`test_no_extended_stall*`) - none of them checked *which* verbs were
+ever issued. An agent that issues `PLANT`/`WATER`/`HARVEST` all game and
+nothing else passes both checks easily while an entire mechanic (DROP,
+or the four-verb animal chain) sits completely dead. `make test` stayed
+green through all of it.
+
+Added `test_every_action_verb_is_exercised` (`tests/test_invariants.py`):
+runs a full 720-turn episode and asserts every verb in the env's unit and
+market action space (`UNIT_VERBS`/`MARKET_VERBS`, transcribed from
+`kaggriculture.py`'s op-dispatch) is issued at least once. Movement and
+`PASS` are excluded as trivially exercised by every episode.
+
+This test would have caught both branches immediately: DROP and the
+entire `BUILD_COOP`/`BUILD_PASTURE`/`PICKUP`/`PLACE` chain would have
+shown up in the failure message on the first run, by name, instead of
+needing direct instrumentation to discover months into the project.
+
+Running it against the current agent surfaced one more gap it wasn't
+built to find: **`FERTILIZE`** (apply fertilizer to a *crop*, distinct
+from `COLLECT_FERTILIZER` which harvests it from an animal) has never
+been issued either. WHEAT and CARROT both need fertilizer to reach their
+listed max yield per `docs/rules.md`, so this is very likely leaving
+yield on the table the same way the two branches above did before they
+were fixed - but it's a narrower, single-mechanic gap, not a
+dwarfing-everything-else one, so it's logged here as a candidate next
+step (see the re-baseline entry) rather than pulled into this branch.
+Added to `KNOWN_UNCOVERED` in the new test so it's excused *and tracked*,
+not silently allowed - removing it from that set is the acceptance bar
+for whoever picks it up.
+
+Verdict: ADOPTED.
