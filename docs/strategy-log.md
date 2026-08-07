@@ -408,3 +408,45 @@ not just to the original merge decision.
 
 **No code, PARAMS, or agent logic changed in this entry** — diagnostic
 only, per instruction.
+
+### 2026-08-07  Arena infrastructure: snapshot isolation + seeded random opponent
+
+Two fixes to the ruler itself, in response to the determinism audit above.
+No agent/PARAMS/strategy code changed.
+
+**Snapshot isolation (commit `3ed8330`).** `arena/run.py` now copies
+`agent/` into a fresh `tempfile.mkdtemp()` snapshot at the start of every
+invocation; any candidate/opponent path resolving inside the live `agent/`
+dir is transparently redirected to the snapshot. Verified adversarially,
+not just by reasoning about the code: launched a real 72-episode run,
+mutated `agent/main.py` mid-run to short-circuit to all-PASS (the exact
+failure mode from the phantom-stall session), confirmed via `diff` that the
+on-disk snapshot was untouched, and confirmed the run's actual results
+(`hires` 239.9, healthy final banks ~2591) reflect the pre-mutation agent.
+The run header now prints git SHA + dirty flag, the snapshot path, and the
+opponent pool; the JSON output is now `{meta, episodes}` instead of a bare
+list (breaking change to that format — anything reading the old flat array
+needs updating, nothing in this repo currently does).
+
+**Seeded random opponent (commit `4643057`).** Added
+`arena/opponents/random_seeded/main.py`, replicating the built-in
+`random_agent`'s action distribution but deriving its RNG from the episode
+seed + turn + seat instead of OS entropy.
+`configuration["seed"]` is cleared before any agent (built-in or custom)
+ever sees it — confirmed empirically with a probe agent
+(`config.get("seed")` returned `None`) — so `arena/run.py` now sets a
+`KAGGRI_ARENA_SEED` env var immediately before each episode's `env.run()`,
+which the opponent reads. Deliberately does not import from `agent/`
+(self-contained, so it isn't affected by the snapshot mechanism or by
+edits to the live agent code). Verified bit-for-bit reproducible both
+standalone (100-turn per-action diff, 0 mismatches) and through the full
+arena harness post-split (0 bank diffs across two independent runs, all
+episodes, all metrics). Replaces `"random"` with `"random_seeded"` in
+`DEFAULT_OPPONENTS`.
+
+Net effect: every number produced by `arena/run.py` from this commit
+forward is fully reproducible given the same seeds/pool/code state, and is
+self-documenting about exactly which code state produced it. The
+`+5pp`/noise-floor problem from the determinism audit above is unrelated to
+this and still stands — this fixes the *reproducibility* of a given
+measurement, not its *statistical power*.
