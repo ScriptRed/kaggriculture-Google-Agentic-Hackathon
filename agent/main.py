@@ -40,7 +40,17 @@ PARAMS = {
     "sell_batch_premium": 3,    # max units/turn for premium goods
     "sell_batch_staple": 12,    # max units/turn for wheat/egg
     "seed_buffer": 6,           # keep this many seeds of the active crop
-    "capital_reserve": 1200,    # shared cash floor for land/animal/seed spend
+    "capital_reserve": 1200,    # cash floor for land/animal/seed spend
+    "tiles_per_unit": 4,        # cap on simultaneous plants+held-seed per
+                                 # farmer/hand - see _market_orders step 3.
+                                 # capital_reserve alone used to be the only
+                                 # thing preventing overplanting, as a side
+                                 # effect of being strict about cash; loosen
+                                 # the cash side (needed to fix the deadlock
+                                 # below) without this and the hand count
+                                 # can't keep up with the resulting plants -
+                                 # tried it, cost -231/-260 coins paired vs
+                                 # v1 (see docs/strategy-log.md).
     "land_buy_min_day": 10,     # let the crop engine establish before land
     "goose_buy_min_day": 12,    # ...and later still for animals (slower payback)
     "crop_early": "WHEAT",
@@ -227,10 +237,16 @@ def _market_orders(obs, farm, private, day, hour):
     seeds = private.get("seeds", {}) or {}
     inv = (obs.get("market", {}) or {}).get("inventory", {}) or {}
     hires_today = farm.get("hires_today", 0)
+    crop = _pick_crop(farm, seeds, day)
 
-    # 1. hire at the start of the day - actions are the constraint
+    # 1. hire at the start of the day - actions are the constraint. But
+    # hiring must never be able to spend the cash the crop engine needs to
+    # bootstrap itself: floor the budget at twice the active crop's seed
+    # cost (not a flat $50), so a run of cheap hires can't leave us unable
+    # to afford the one purchase that generates future income.
     if hour == 0:
-        budget = min(money * PARAMS["hand_budget_frac"], money - 50)
+        seed_floor = (CROPS[crop]["seed"] * 2) if crop else 20
+        budget = min(money * PARAMS["hand_budget_frac"], max(0, money - seed_floor))
         spent = 0
         n = hires_today
         while n < PARAMS["target_hands"]:
@@ -262,13 +278,36 @@ def _market_orders(obs, farm, private, day, hour):
         if n > 0:
             orders.append(["SELL", item, n])
 
-    # 3. keep seeds stocked
-    crop = _pick_crop(farm, seeds, day)
+    # 3. keep seeds stocked. Two things, kept deliberately separate:
+    #
+    # (a) a cap on *simultaneous* plants+held-seed relative to hand count,
+    #     independent of cash. Fixes overplanting - see the tiles_per_unit
+    #     comment above.
+    # (b) the cash gate. Private seeds start at 0 for every crop (env
+    #     source), so this is the only bootstrap out of a cold start and
+    #     must never be permanently blocked - but only in that exact state
+    #     (nothing planted, nothing held). Everywhere else, this is exactly
+    #     the original all-or-nothing capital_reserve check, unchanged. The
+    #     trickle fallback only fires when we're completely out of seed
+    #     (not just "below the buffer") - _market_orders runs every hour, so
+    #     a trickle gated on "any room" fires repeatedly per day as tiles
+    #     free up and drains far more cash than one seed's worth: tried it,
+    #     cost -156 coins paired vs v1 from hire budget starving as money
+    #     bled out (see docs/strategy-log.md).
     if crop:
-        want = PARAMS["seed_buffer"] - seeds.get(crop, 0)
+        n_units = 1 + len(farm.get("hands", []))
+        in_flight = sum(seeds.values()) + sum(
+            1 for _, _, t in _iter_tiles(farm)
+            if isinstance(t, dict) and t.get("kind") == "PLANT"
+        )
+        capacity = max(0, n_units * PARAMS["tiles_per_unit"] - in_flight)
+        want = min(PARAMS["seed_buffer"] - seeds.get(crop, 0), capacity)
         cost = CROPS[crop]["seed"]
-        if want > 0 and money > cost * want + PARAMS["capital_reserve"]:
-            orders.append(["BUY_SEED", crop, want])
+        if want > 0 and cost > 0:
+            if money > cost * want + PARAMS["capital_reserve"]:
+                orders.append(["BUY_SEED", crop, want])
+            elif seeds.get(crop, 0) == 0 and money >= cost:
+                orders.append(["BUY_SEED", crop, 1])
 
     # 4. buy wheat to feed animals if we're short
     need = _wheat_needed(farm) - shed.get("WHEAT", 0)

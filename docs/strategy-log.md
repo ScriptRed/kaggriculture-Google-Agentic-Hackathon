@@ -579,3 +579,87 @@ estimates hold up against actual strategic divergence and not just seat-
 order noise.
 
 No agent/PARAMS logic changed in this entry.
+
+### 2026-08-07  Fix the capital_reserve stall trap
+
+Hypothesis: at startingMoney $1000-1300, main locks into permanent PASS -
+`capital_reserve=1200` never clears while hiring keeps draining cash, and
+the observed real-game minimum bank (1380) was only a 4% margin above the
+trap line (1320). Fix it: hiring must not be able to spend below what the
+crop engine needs, the reserve must yield when no productive assets exist,
+and reconsider whether a flat 1200 is the right shape at all.
+
+**This took three attempts to get right, and the first two were real
+regressions, not just smaller-than-hoped wins. Recording all three because
+the failure modes are the useful part.**
+
+**Attempt 1 - reserve yields to a much smaller flat value once we hold any
+asset.** Fixed the deadlock (all 8 stress values passed). But
+`--compare v1-early-capital-discipline` (identical starting code, so this
+should be near zero) came back **mean -231.3, 95% CI [-298,-222], t and
+Wilcoxon both p<0.0001, win rate 6.2%.** `plants_weeded` had jumped 2 -> 18.
+Root cause, confirmed by comparing plant counts turn-by-turn against v1: a
+smaller cash reserve let seed-buying refill the whole `seed_buffer` (6)
+far more often than the fixed hand count could water/harvest, so the extra
+plants died as weeds. The reserve *value* was never the actual problem -
+nothing was capping *how many tiles get planted relative to hand count*,
+and the original flat 1200 threshold had only ever prevented overplanting
+as an accidental side effect of being too strict to trigger often.
+
+**Attempt 2 - keep the reserve back at capital_reserve, but buy only 1 seed
+at a time ("trickle") whenever the full-buffer purchase isn't affordable.**
+`plants_weeded` dropped to near zero (0.05) - confirmed that piece of the
+diagnosis. But `--compare` still came back **mean -156.1, 95% CI
+[-209,-103], both tests p<0.0001, win rate 36.5%.** Turn-by-turn trace
+(seed 89, the worst pair) showed money bleeding from 2393 (day 10) to 282
+(day 19) - hand count fell from 8 to 5 over the same stretch as the hire
+budget (`money * 0.05`) shrank along with it. Instrumented `_market_orders`
+directly (temporary debug print, not committed) and confirmed: the trickle
+condition was `want > 0`, and `_market_orders` runs every hour: as tiles
+finish and clear, `want` goes positive again and the trickle can fire
+several times a day, at $20/seed (CARROT). That's a real, uncapped
+recurring cost the hire budget then has to compete with every single
+morning - a much larger and more sustained drain than "one seed's worth,"
+even though no single purchase looked wrong in isolation.
+
+**Attempt 3 (adopted) - two independent mechanisms, not one shared reserve
+value:**
+1. `tiles_per_unit: 4` - cap `want` at `(1 + hands) * tiles_per_unit -
+   (held seeds + planted tiles)`, independent of cash. This is what
+   actually prevents overplanting; nothing about it depends on how strict
+   the cash gate is.
+2. Cash gate reverted to *exactly* the original all-or-nothing
+   `capital_reserve` check for the normal case (unchanged from before this
+   whole investigation). The only new branch: if we hold **zero** seed of
+   the active crop (not "below buffer" - *zero*) and can afford one, buy
+   exactly one. Rate-limited by construction: buying immediately makes the
+   held-count nonzero, so it can't refire until that one seed is consumed.
+
+Verification:
+- `make test`: 95/95 green, including the new parametrized stress test
+  (below) and the existing `test_no_extended_stall`.
+- New trap line: **$20** (CARROT's seed cost - `_pick_crop` defaults to
+  `crop_main` when neither crop has stock, so that's the true minimum
+  purchase needed to ever escape). Confirmed by direct scan: $19 stalls
+  (100% PASS the whole 240-turn episode), $20 works (64.6% worst window).
+  Comfortably under the requested "well under $500."
+- `--compare v1-early-capital-discipline` (48 seeds, 96 episodes): **mean
+  +171.9, sd 63.2, se 6.45, 95% CI [+159.1, +184.7], paired t-test
+  t=+26.657 p<0.0001, Wilcoxon z=+8.509 p<0.0001, win rate 100.0%,
+  plants_weeded 0.000.** This isn't "does not regress" - v1 loses every
+  single one of the 96 episodes. Clears the Task C acceptance bar (95% CI
+  excludes zero, both tests agree, point estimate far past the ~50-coin
+  floor) by a wide margin.
+
+Verdict: ADOPTED.
+
+Notes: this is the first real (non-self-play) use of the Task C paired-
+differential tooling, and it earned its keep immediately - both failed
+attempts would have looked like plausible, mergeable fixes under the old
+"run make test, glance at win rate" workflow (test suite was green in both
+cases; win rate alone would have been the headline number). The `--compare`
+tool caught a -231 and a -156 coin regression that a win-rate-only check
+at n=12 could easily have missed or misread as noise. Also: a comment
+thread in `agent/main.py` now carries the history of what didn't work and
+why for this exact code path - worth checking before touching
+`_market_orders` step 3 again.
