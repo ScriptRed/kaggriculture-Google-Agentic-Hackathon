@@ -450,3 +450,132 @@ self-documenting about exactly which code state produced it. The
 `+5pp`/noise-floor problem from the determinism audit above is unrelated to
 this and still stands — this fixes the *reproducibility* of a given
 measurement, not its *statistical power*.
+
+### 2026-08-07  Paired bank differential as the primary development signal
+
+Task: win rate's standard error was measured at ~10-13pp at n=12 seeds
+(previous entry) — bigger than the +5pp acceptance bar. Add a
+lower-variance estimator for development, keep win rate as the ladder-facing
+check, and empirically re-derive what seed count and acceptance bar are
+actually defensible.
+
+**Implementation (`arena/metrics.py`, `arena/run.py`).** Added
+`differential_report()`: paired t-test, Wilcoxon signed-rank (normal
+approximation, tie-corrected), 95% CI, skewness, and excess kurtosis for a
+list of per-episode `(my_bank - opp_bank)` values. No scipy: `.github/
+workflows/arena.yml` only installs `kaggle-environments` and `pytest`, so a
+scipy import in `arena/` would break CI, and `agent/` must never gain a
+dependency beyond stdlib regardless. Implemented the regularized incomplete
+beta function (Student's t CDF), the normal CDF/quantile (Acklam's rational
+approximation), skewness/kurtosis, and the paired t and Wilcoxon tests
+directly in pure Python. **Cross-validated against scipy locally (dev-only,
+not a runtime dependency)** over 200 randomized trials spanning n=5..96 and
+several distribution shapes (normal, skewed, tied, zero-inflated): t-statistic
+matched to 1.8e-15, Wilcoxon p-value to 2.2e-16, 95% CI bounds to 1.6e-13,
+skewness/kurtosis to ~1e-14, and `norm_quantile` to 1.8e-9 (within the stated
+error bound of the Acklam approximation used). The manual implementation is
+correct, not just plausible-looking.
+
+Every opponent leg of a normal run now prints its differential report
+alongside win rate, clearly labeled ladder-metric vs dev-signal. Added
+`--compare <reference>` for a focused head-to-head report against one named
+agent (frozen pool name or path) across the full seed set, both seats.
+
+**Self-play null distribution.** `python arena/run.py --compare
+v1-early-capital-discipline` with current `main` (byte-identical to that
+frozen snapshot right now, confirmed by `diff`) is a true null: candidate
+and reference are the same code, so the true effect is exactly zero. Ran it
+on the original 12 canonical seeds (n=24 episodes) plus 50 additional
+exploratory seeds (`random.Random(999999)`, not added to the canonical list,
+used only for this analysis) for a more stable SD estimate — n=124 pooled.
+
+Result: **mean differential is exactly 0.0 in every sample**, not just
+statistically indistinguishable from zero. This is mathematically forced,
+not a coincidence: for identical deterministic code, `diff(seed, swap=False)
+= -diff(seed, swap=True)` exactly (whichever code runs in seat 0 behaves
+identically regardless of which "role" we call it), so every seed's
+swap-pair cancels perfectly. This is a real, useful confirmation that the
+harness and the byte-identity of `main.py`/the frozen snapshot both hold —
+if it hadn't come out to exactly 0, that would itself have been a bug.
+Excess kurtosis came out severe (3.6-4.1, `differential_report` correctly
+flagged it as "SEVERE, trust wilcoxon") — expected for a distribution built
+entirely from ± pairs, and the reason Wilcoxon is reported as a co-equal
+check rather than a footnote.
+
+Pooled SD = 73.3 coins/episode (both-seats-combined, n=124) / 73.4
+(conservative: one observation per seed, swap=False only, n=62 — these
+came out nearly identical here specifically *because* of the exact-cancellation
+property above, which won't hold for a real, non-self-play comparison. Report
+both bounds; treat the conservative one as the planning basis).
+
+**This number is dramatically smaller than I expected going in** — head-to-
+head paired play cancels almost all of the between-seed environmental noise
+(market/weed RNG) that dominates the win-rate-vs-a-fixed-third-party design,
+because both agents face the *identical* realized market in the *same*
+episode, competing directly, rather than two separate episodes against an
+independent opponent. That is the actual mechanism behind "lowest-variance
+estimator available," not just a slogan.
+
+**MDE at 80% power, alpha=0.05 two-sided** (`min_detectable_effect`, normal
+approximation to the noncentral-t power calc — standard and adequate at
+these n, exact would need noncentral t and isn't worth it for a planning
+estimate):
+
+| n_seeds | bank diff, optimistic (n=2×seeds) | bank diff, conservative (n=seeds) | win rate, optimistic | win rate, conservative |
+|---|---|---|---|---|
+| 12 | 41.9 coins | 59.4 coins | 28.6pp | 40.4pp |
+| 24 | 29.6 coins | 42.0 coins | 20.2pp | 28.6pp |
+| 48 | 21.0 coins | 29.7 coins | 14.3pp | 20.2pp |
+| 96 | 14.8 coins | 21.0 coins | 10.1pp | 14.3pp |
+
+Typical final banks in this repo's arena runs range roughly 1300-4700 coins.
+A 30-60 coin MDE is under 2% of that range — the paired differential can
+detect real effects the current strategy log's win-rate-only entries could
+never have distinguished from noise (the v1-vs-v0 gap flagged as
+"within noise" two entries back was ~700-900 coins in mean bank — this
+design would have called that decisively, one way or the other).
+
+**Wall-clock, measured directly** (not estimated): 24 episodes (4 seeds × 3
+opponents × 2 seats) took 15.4s with 7 workers = 0.641s/episode. Extrapolated:
+
+| n_seeds | full 3-opponent pool (`make arena`) | `--compare` (1 opponent) |
+|---|---|---|
+| 12 | 46s | 15s |
+| 24 | 92s | 31s |
+| 48 | 184s (~3.1 min) | 62s |
+| 96 | 369s (~6.1 min) | 123s |
+
+**Decision: raised `SEEDS` from 12 to 48** (original 12 preserved, 36 new
+seeds appended, generated by `random.Random(20260807)`, deduped). This is
+the one sanctioned exception to the skill's "don't edit `SEEDS` casually"
+rule — it's being done deliberately, on the record, with the empirical
+justification above, not casually. `.github/workflows/arena.yml`'s CI job
+is unaffected (`--seeds 6` explicitly caps it regardless of list length).
+Rationale: 48 seeds costs ~3 min for a full pool run and ~1 min for a
+`--compare`, both fully tolerable for iteration, and gets conservative bank-
+diff MDE to ~30 coins (excellent — most real strategy changes will clear
+this easily) while conservative win-rate MDE improves to ~20pp (still coarse,
+but win rate is being demoted to a secondary/ladder-facing check, not the
+primary signal, specifically because it can't be made precise at any
+seed count that's cheap enough to iterate against — 96 seeds only buys
+14.3pp optimistic / still requires trusting the optimistic bound to get
+under 15pp).
+
+**New acceptance bar** (replaces the flat "+5pp win rate" rule): ADOPTED
+requires the paired differential's 95% CI to exclude zero, the t-test and
+Wilcoxon to agree in significance (trust Wilcoxon if they don't), and the
+point estimate to clear ~50 coins — comfortably above the n=48 conservative
+MDE of ~30 coins, so a bare "technically significant" result isn't enough on
+its own. Win rate is still reported and is the actual ladder metric, but a
+win-rate swing unaccompanied by a matching bank-differential swing should be
+treated as a signal to look for a bug in the measurement, not as
+independent confirmation.
+
+Updated `CLAUDE.md` and `.claude/skills/new-strategy/SKILL.md` to reflect
+this. Not yet exercised on a real (non-self-play) comparison — Task D will
+be the first real use of `--compare` against a genuinely different
+candidate, which will be a useful check that the self-play-derived MDE
+estimates hold up against actual strategic divergence and not just seat-
+order noise.
+
+No agent/PARAMS logic changed in this entry.

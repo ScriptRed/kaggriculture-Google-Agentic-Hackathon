@@ -26,8 +26,28 @@ make freeze NAME=x  # snapshot agent/ into arena/opponents/x/
 ```
 
 `make arena` is the fitness signal. **Never claim an improvement without it.**
-Fixed seeds, same pool, every time. A change is real at >= +5pp win rate or a
-clear bank delta across the full seed set; anything smaller is noise.
+Fixed seeds (48, `arena/run.py:SEEDS`), same pool, every time.
+
+**Win rate alone is too noisy to develop against.** At 12 seeds its standard
+error was measured at 10-13pp (see docs/strategy-log.md, "Arena determinism
+and noise-floor audit") — bigger than the old +5pp acceptance bar. Use the
+**paired bank differential** as the primary signal instead:
+`python arena/run.py --compare <reference>` runs the candidate head-to-head
+against a named reference (a frozen pool name or a path) across the full
+seed set and both seats, and reports the mean bank differential with a
+paired t-test, a Wilcoxon signed-rank test (trust Wilcoxon if they
+disagree — final-bank distributions run heavy-tailed), and a 95% CI. This is
+dramatically more sensitive than win rate (~30-40 coins MDE at n=12-24 vs.
+~30-40pp for win rate) because it isn't discarding margin.
+
+**Acceptance bar:** a change is ADOPTED if the paired differential's 95% CI
+excludes zero, the t-test and Wilcoxon agree (or Wilcoxon is significant if
+they don't), and the point estimate exceeds ~50 coins (the conservative MDE
+at n=48, with headroom) — not just "p < 0.05 by a hair." Win rate is still
+reported on every run and is the actual ladder metric, but is not the
+iteration signal; treat a large win-rate swing with no matching bank-diff
+swing as suspicious, not confirmatory. See docs/strategy-log.md for the full
+derivation (self-play null distribution, MDE table, wall-clock costs).
 
 ## Layout
 
