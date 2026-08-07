@@ -29,6 +29,8 @@ unreliable here.
    file. Record REJECTED results too — they are the most valuable entries.
 9. If ADOPTED: merge, then `make freeze NAME=<version>` and add the snapshot to
    `DEFAULT_OPPONENTS` in `arena/run.py` so future versions must beat it.
+10. **Push to `origin main`** as part of every merge to `main`. Local commits
+    that never leave the machine aren't a shared record of anything.
 
 ## Anti-patterns
 
