@@ -173,3 +173,36 @@ def test_sustainable_rate_expected_mode_matches_monte_carlo_of_env_rng():
                 C.CENTER_SELL_TICKS_PER_DAY * C.town_center_multiplier(d)
                 if item in C.TOWN_CENTER_PRODUCTS else 0)
             assert empirical == pytest.approx(model, abs=0.6), (item, d)
+
+
+# --- premium price-cliff engine check (notebooks/live-meta) ----------------
+#
+# Guards against a real, specific failure mode: a kaggle-environments
+# upgrade silently shipping different market math. notebooks/live-meta
+# flags this directly - "the strawberry price cliff is 62 units in 1.32.x
+# but ~247 in other builds" - and embeds its own reference model rather
+# than trusting whatever's installed, for exactly this reason. We instead
+# pin the expectation here: if a future pip upgrade changes these numbers,
+# `test_price_curve_matches_env` (above) will already fail since it checks
+# every point against the installed env directly - this test additionally
+# pins the four specific "units to hit the $1 floor from I0" figures the
+# notebook's own 683-episode/1,366-player ladder analysis was built
+# against, so a silent engine change that happens to still pass the
+# per-point check can't silently invalidate that calibration too.
+
+def _cliff_units(item):
+    inv, sold = C.MARKET_I0, 0
+    while C.market_price(item, inv) > 1 and sold < 3000:
+        inv += 1
+        sold += 1
+    return sold
+
+
+@pytest.mark.parametrize("item,expected", [
+    ("STRAWBERRY", 62),
+    ("WOOL", 59),
+    ("MILK", 76),
+    ("MELON", 158),
+])
+def test_premium_price_cliffs_match_notebook_reference(item, expected):
+    assert _cliff_units(item) == expected
