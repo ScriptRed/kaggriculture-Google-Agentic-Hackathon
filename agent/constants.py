@@ -66,11 +66,29 @@ ANIMAL_PRODUCTS = {a["product"] for a in ANIMALS.values()}
 
 SHOP_UNLOCK_INTERVAL = 3      # env: townShopUnlockInterval. 1st shop unlocks day 3.
 SHOP_SELL_TICKS_PER_DAY = 24 // 4    # env: townShopSellInterval (4 turns/tick)
-CENTER_SELL_TICKS_PER_DAY = 24 // 12  # env: townCenterSellInterval (12 turns/tick)
+CENTER_SELL_TICKS_PER_DAY = 24 // 24  # env: townCenterSellInterval (24 turns/tick,
+                                       # kaggle-environments >=1.32.6 - see below)
 
 TOWN_CENTER_PRODUCTS = [p for p in PRODUCTS if p != "FERTILIZER"]
-# (day_threshold, multiplier), env: TOWN_CENTER_DEMAND_SCHEDULE, highest first.
-TOWN_CENTER_DEMAND_SCHEDULE = [(20, 4), (10, 2), (0, 1)]
+
+# Shops are now drawn WITH replacement (kaggle-environments 1.32.6, PR #1394):
+# the same shop can unlock more than once, each copy consuming independently,
+# capped at MAX_SHOP_INSTANCES total draws rather than one-of-each. Coincides
+# numerically with len(SHOPS) (8 shop types, 8 max instances) but is a
+# different cap conceptually - kept as its own named constant so the two
+# don't silently drift together if the roster ever changes.
+MAX_SHOP_INSTANCES = 8        # env: MAX_SHOP_INSTANCES
+
+# 1.32.5 and earlier: TOWN_CENTER_DEMAND_SCHEDULE doubled the town centre's
+# per-tick pull after day 10 and again after day 20 (1 -> 2 -> 4). Removed
+# in 1.32.6 (PR #1394) - the town centre now pulls a flat 1 unit/tick for
+# the whole season, at a quarter the old tick frequency (interval 12 -> 24,
+# folded into CENTER_SELL_TICKS_PER_DAY above), which nets out to exactly
+# "1 of each non-fertilizer product per day, forever" - see the docstring
+# on sustainable_rate. No day-dependent multiplier exists anymore, so
+# there's nothing left for a schedule table or a multiplier function to do;
+# both removed rather than kept as a permanently-1x no-op (dead code that
+# would look load-bearing to the next reader).
 
 
 def _shop_unit_rate(shop):
@@ -86,21 +104,16 @@ def _item_shop_full_rate(item):
                for s, products in SHOPS.items() if item in products)
 
 
-def town_center_multiplier(day):
-    for threshold, mult in TOWN_CENTER_DEMAND_SCHEDULE:
-        if day >= threshold:
-            return mult
-    return 1
-
-
 def shops_unlocked_by_day(day):
-    """Number of shops unlocked entering `day`.
+    """Number of shop INSTANCES drawn entering `day` (not distinct shops -
+    kaggle-environments >=1.32.6 draws with replacement, so this can
+    include repeats; see MAX_SHOP_INSTANCES above).
 
-    *Which* shops is chosen uniformly at random per episode (one new shop
-    every SHOP_UNLOCK_INTERVAL days, picked from those remaining) - only
-    the count is deterministic.
+    *Which* shop each instance is comes from a uniform random draw per
+    episode (one new instance every SHOP_UNLOCK_INTERVAL days, capped at
+    MAX_SHOP_INSTANCES total) - only the count is deterministic.
     """
-    return min(len(SHOPS), max(0, day) // SHOP_UNLOCK_INTERVAL)
+    return min(MAX_SHOP_INSTANCES, max(0, day) // SHOP_UNLOCK_INTERVAL)
 
 
 def sustainable_rate(item, day, unlocked_shops=None):
@@ -110,19 +123,33 @@ def sustainable_rate(item, day, unlocked_shops=None):
     depressing their own price - the town removes stock every tick,
     regenerating the room sales opened up.
 
-    Two modes:
+    The town centre term is a flat `CENTER_SELL_TICKS_PER_DAY` (1 unit/day
+    at the installed engine's defaults) for every non-fertilizer product,
+    no day dependence - see the note above CENTER_SELL_TICKS_PER_DAY.
+
+    Two modes for the shop term:
     - `unlocked_shops` given (pass the live `obs["town"]["unlocked_shops"]`):
-      exact, for in-game decisions.
+      exact, for in-game decisions. Duplicates in the list (the same shop
+      drawn more than once) are counted correctly - each entry in the list
+      contributes its own rate, since each copy consumes independently.
     - `unlocked_shops=None` (planning without an episode, e.g. ranking
-      crops before day 0): the *expected* rate. Because shop unlock order
-      is a uniformly random permutation of the 8 shops, the probability a
-      specific shop carrying `item` is unlocked by `day` is exactly
-      shops_unlocked_by_day(day) / len(SHOPS) - this is exact in
-      expectation, not a heuristic (verified against the env's own RNG by
-      Monte Carlo; see tests/test_constants.py).
+      crops before day 0): the *expected* rate. Shops are now drawn WITH
+      replacement (each of the `shops_unlocked_by_day(day)` draws is an
+      independent uniform pick over all MAX_SHOP_INSTANCES-many "slots" of
+      len(SHOPS) shop types), so the expected number of instances of one
+      specific shop after k draws is still exactly k / len(SHOPS) - the
+      same linearity-of-expectation argument holds under sampling with
+      replacement as it did without, so this formula did not need to
+      change when the draw mechanic did (re-verified by Monte Carlo
+      against the new env's own RNG; see tests/test_constants.py). What
+      *did* change is the variance: draws can now duplicate or skip a
+      shop entirely (e.g. 4x YARN_STORE, zero PET_CAFE, confirmed
+      possible), so this expected-value mode is now a substantially
+      less reliable stand-in for any single real episode than it used to
+      be - prefer the live mode whenever `obs` is available (Task 2,
+      2026-08-08).
     """
-    center = (CENTER_SELL_TICKS_PER_DAY * town_center_multiplier(day)
-              if item in TOWN_CENTER_PRODUCTS else 0)
+    center = CENTER_SELL_TICKS_PER_DAY if item in TOWN_CENTER_PRODUCTS else 0
 
     if unlocked_shops is not None:
         shop = sum(SHOP_SELL_TICKS_PER_DAY * _shop_unit_rate(s)
