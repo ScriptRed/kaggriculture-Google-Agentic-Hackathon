@@ -44,7 +44,7 @@ PARAMS = {
     "target_hands": 8,          # hands to hire each morning
     "hand_budget_frac": 0.05,   # ...but never spend more than this of bank
     "sell_floor_frac": 0.65,    # price floor for one-time-harvest sells
-                                 # (WHEAT/MELON) and a safety net under the
+                                 # (WHEAT) and a safety net under the
                                  # absorption-metered ongoing sells (MILK/
                                  # WOOL) - see _sell_plan.
     "seed_buffer": 6,           # keep this many seeds of the active early crop
@@ -66,7 +66,7 @@ PARAMS = {
                                  # cash naturally reaching ~$1,000 by then,
                                  # not a rule to hard-code - gate opens at 5
                                  # so revenue (fertilizer from ~day 2, the
-                                 # wheat/melon harvest) has a few days'
+                                 # wheat harvest) has a few days'
                                  # head start before land competes for the
                                  # same cash, then let affordability (see
                                  # _reserve()) decide the actual day.
@@ -82,7 +82,21 @@ PARAMS = {
     # the top-5 cluster) is pure animal with zero surviving crops;
     # strawberry only appears in minority (~2.5%) compositions and isn't
     # asked for here - see docs/strategy-log.md for the full reasoning.
-    "early_crop_target": {"WHEAT": 14, "MELON": 12},  # 11.6 rounds to 12
+    #
+    # MELON removed entirely (2026-08-08, kaggle-environments 1.32.6):
+    # melon has zero shop demand (no SHOPS entry lists it) and lived
+    # entirely on the town centre, which the engine upgrade cut from
+    # ~140 units/season absorption to 30 (the old day-10/day-20 demand
+    # doubling is gone - flat 1/day now, confirmed against a real
+    # episode, see tests/test_constants.py). The live-meta target of 12
+    # melon tiles/player (~72 units at max yield, 144 combined with an
+    # opponent who shares the same market) already oversupplied the old
+    # 140-unit season absorption; against 30 it's catastrophic. We were
+    # already only reaching 3/12 tiles in practice (docs/strategy-log.md,
+    # Task 1 seed-buying priority competition) - not worth fixing that
+    # competition now that the crop it was competing with WHEAT for is
+    # actively harmful to plant at all.
+    "early_crop_target": {"WHEAT": 14},
     # Herd: every one of the top-5 compositions (1,366 players) is exactly
     # COW:8, SHEEP:6, first bought day 0 - no exceptions, and only 1 of
     # 1,366 players ever sold an egg. Geese dropped entirely.
@@ -132,7 +146,7 @@ def _reserve(day):
 # sustainable-revenue work), so meter to it: sell up to a share of daily
 # town absorption, spread across the day, rather than dumping a flat batch.
 #
-# One-time-harvest items (WHEAT, MELON here - see early_crop_target) get no
+# One-time-harvest items (WHEAT here - see early_crop_target) get no
 # metering cap at all: they're a fixed quantity from a bounded early
 # planting window, not a flow to protect over the rest of the season -
 # `sustainable_rate` doesn't even apply (there's no "next batch" whose
@@ -159,7 +173,7 @@ def _sell_plan(item, qty, day, cur_inv, unlocked_shops):
         # absorption from arriving all at once and crashing itself.
         n = min(qty, max(1, round(daily / 6)))
     else:
-        n = qty  # one-time harvest (WHEAT/MELON): no daily rate to protect
+        n = qty  # one-time harvest (WHEAT): no daily rate to protect
     base = MARKET_PARAMS[item]["base"]
     floor = base * PARAMS["sell_floor_frac"]
     while n > 0 and marginal_price_after(item, cur_inv, n) < floor:
@@ -496,8 +510,10 @@ def _pick_crop(farm, seeds, day):
     same shape as the original capital_reserve stall trap. Gap-based
     keeps trying (at whatever pace cash allows) until the target is
     actually met, so a slow start still finishes eventually instead of
-    stalling forever. Picks whichever of WHEAT/MELON has the bigger
-    remaining gap to its target."""
+    stalling forever. Picks whichever crop in `early_crop_target` has the
+    bigger remaining gap (WHEAT only since the 2026-08-08 melon removal -
+    see the PARAMS comment - but left as a loop over the dict rather than
+    hard-coded to one crop, in case that target ever grows again)."""
     best, best_gap = None, 0
     for crop, target in PARAMS["early_crop_target"].items():
         cd = CROPS[crop]

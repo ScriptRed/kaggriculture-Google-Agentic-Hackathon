@@ -2056,3 +2056,123 @@ Deliberately self-contained per this file's existing convention - no
 
 Verdict: PARTIAL - two real bugs fixed and measured, target not reached,
 cause of the remainder named per the brief's own fallback instruction.
+
+### 2026-08-08  ENGINE UPGRADE: kaggle-environments 1.32.5 -> 1.32.6 (PR #1394)
+
+Upgraded local venv, diffed the installed engine source against a saved
+1.32.5 copy directly (not just the changelog) before changing anything.
+Two real changes, confirmed both in source and against a live episode:
+
+1. `TOWN_CENTER_DEMAND_SCHEDULE` (the old day-10/day-20 demand doubling,
+   1x -> 2x -> 4x) is gone. `townCenterSellInterval` default changed
+   12 -> 24, and the per-tick pull is now flat 1 unit (was
+   `center_mult`-scaled). Net effect: flat 1 unit/day for the whole
+   season, verified directly against a real `pass`-vs-`pass` episode
+   (WHEAT inventory drops by exactly 1 at the end of each of the first
+   three days, before any shop unlocks). Old season total for one item:
+   140 units (10 days x2 + 10 days x4 + 10 days x8... transcribed
+   correctly as `10*2+10*4+10*8=140`). New: flat `1 x 30 = 30`. An 88.6%
+   cut - confirmed the brief's own "~140 -> 30" figure independently.
+2. Shops now draw WITH replacement, capped at `MAX_SHOP_INSTANCES=8`
+   (was: one guaranteed draw of each of the 8 shop types, no duplicates
+   possible). A single episode can now get 4x YARN_STORE and zero
+   PET_CAFE - variance up, no longer safe to assume a specific shop is
+   unlocked by a specific day.
+
+Crops, animals, prices, and cliffs unchanged - confirmed by diffing the
+full JSON spec and Python source, not just spot-checking the two changes
+above (the diff surfaced nothing else).
+
+**`agent/constants.py` changes:** removed `TOWN_CENTER_DEMAND_SCHEDULE`
+and `town_center_multiplier` (nothing left for either to do - a
+permanently-1x no-op function would be dead code masquerading as
+load-bearing); `CENTER_SELL_TICKS_PER_DAY` now `24//24=1` (was
+`24//12=2`); `sustainable_rate`'s center term is now a flat constant.
+`sustainable_rate`'s **shop term needed no change at all**: the live
+mode (`unlocked_shops` passed) already summed over the raw list
+per-entry, which was already duplicate-safe by construction; the
+expected-value mode (`unlocked_shops=None`) still computes the exact
+expectation under sampling *with* replacement by the same
+linearity-of-expectation argument that held without it (expected
+instances of one specific shop after k draws = k/8 either way) -
+re-verified by Monte Carlo against the new draw mechanic rather than
+assumed, `tests/test_constants.py::test_sustainable_rate_expected_mode_matches_monte_carlo_of_env_rng`.
+
+Frozen opponent snapshots (`arena/opponents/v4-terminal-liquidation`,
+`v5-animal-first-meta`) each carry their own historical copy of
+`constants.py` with the old schedule - deliberately left alone (they're
+frozen records of what actually shipped) and will now silently
+mis-estimate town-centre demand under the new engine. Not a bug to fix;
+exactly the kind of regression Task 3 (re-baseline the pool) exists to
+surface.
+
+`make test`: 109 passed (2 net new: `test_max_shop_instances_matches_env`,
+`test_town_center_is_flat_one_per_day`; one removed:
+`test_town_center_schedule_matches_env`, replaced by
+`test_town_center_products_match_env`).
+
+Change: `agent/constants.py`, `tests/test_constants.py`. No `agent/main.py`
+change in this entry (see the melon-removal entry immediately below for
+the first actual strategy response to the new numbers).
+
+### 2026-08-08  Task 1 (new engine): melon has zero shop demand and the town-centre cut kills it - removed
+
+Brief: verify melon's collapse under the new engine, strip it from the
+production plan if confirmed, measure the gain.
+
+**Verified independently**, not just trusted from the brief: melon has no
+`SHOPS` entry (`test_melon_has_no_shop_demand`, already existing) - the
+town centre is its *only* demand source, ever. Season absorption: old
+140 units, new 30 (computed directly from `CENTER_SELL_TICKS_PER_DAY`
+before/after, matches the engine-upgrade entry above exactly). The
+live-meta target (12 melon tiles/player, ~72 units at max yield, 144
+combined once the opponent's identical target is added - "you can see
+the opponent's tiles, they share your market" per `CLAUDE.md`) already
+oversupplied the *old* 140-unit absorption; against the new 30 it's
+severe oversupply from a single field's output. `MARKET_I0=10000` to the
+melon price floor is 158 units (`_cliff_units("MELON")`) - confirmed a
+combined 144-unit harvest alone gets most of the way to crashing melon's
+own price to $1, before the town centre's now-much-smaller regeneration
+has any chance to recover it.
+
+**Removed melon from `early_crop_target` entirely** (`{"WHEAT": 14,
+"MELON": 12}` -> `{"WHEAT": 14}`). Not worth trying to salvage a smaller
+melon target instead: it was already only reaching 3/12 tiles in
+practice under the *old* numbers (Task 1, previous entry - the
+WHEAT-vs-MELON seed-buying priority competition), so partially fixing
+that competition now that the crop on the other end of it is actively
+value-destroying isn't worth chasing. `_pick_crop` and the seed-buying
+step needed no other change - both are already generic over whatever's
+in `early_crop_target`, so removing the MELON entry is sufficient on its
+own; WHEAT now gets the seed-buying slot uncontested every time.
+
+**Measured against `v5-animal-first-meta`** (the last frozen baseline,
+running its own old melon-included code, both sides now under the
+upgraded 1.32.6 engine so this isolates the code change, not the engine
+change):
+```
+mean +13,904.8   sd 7,748.1   se 790.79
+95% CI [+12,334.9, +15,474.7]
+paired t-test  t=+17.583   p=0.0000
+wilcoxon       z=+8.462   p=0.0000
+win rate 97.9%
+animals_lost 1.583 (mean)
+```
+Clean, large pass on the acceptance bar - the brief's "I expect a gain"
+was right, and by a wide margin (CI floor alone, +12,334.8, is >200x the
+~50-coin MDE).
+
+**Overall final bank is much lower than pre-upgrade runs** (mean $41,125
+here vs the $60-70k range measured before this session) - expected, not
+a regression: melon was real revenue even at reduced efficiency, and
+nothing has replaced it yet (that's Task 2's job - reading shops live to
+find what the new game actually rewards). The cash-curve block in this
+run's own output compares against the *old*-engine ladder median
+(ratios like "day 5: 0.02x" are the reference number being stale, not a
+real 50x regression) - flagged here and fixed properly in the next entry
+(Task 4).
+
+Change: `agent/main.py` (`PARAMS["early_crop_target"]`, comment cleanup
+for now-inaccurate WHEAT/MELON mentions elsewhere in the file).
+
+Verdict: ADOPTED.
