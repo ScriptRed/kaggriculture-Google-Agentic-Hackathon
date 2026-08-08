@@ -44,7 +44,7 @@ SEEDS = [
     564425, 638423, 948091, 154341, 94953, 956778, 659543, 909170, 757581,
 ]
 DEFAULT_OPPONENTS = [
-    "starter", "random_seeded", "v4-terminal-liquidation",
+    "starter", "random_seeded", "v5-animal-first-meta",
     # Distinct-strategy pool, added after the self-play-echo-chamber risk
     # flagged when the arena was designed became real (see
     # docs/ladder-observations.md and docs/meta-analysis.md): every prior
