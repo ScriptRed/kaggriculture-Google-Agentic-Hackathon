@@ -219,8 +219,9 @@ def main():
     overall = 100 * sum(r["result"] for r in rows) / len(rows)
     print(f"\nOVERALL WIN RATE  {overall:.1f}%   ({len(rows)} episodes)\n")
     print(format_summary(rows))
-    print(f"\nCASH CURVE vs real ladder median (notebooks/live-meta, all "
-          f"{len(rows)} episodes, all opponents combined):")
+    print(f"\nCASH CURVE vs OLD-ENGINE HISTORICAL ladder median "
+          f"(notebooks/live-meta, pre-1.32.6, all {len(rows)} episodes, "
+          f"all opponents combined):")
     print(format_curve(rows))
 
     if args.json:

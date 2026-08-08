@@ -2176,3 +2176,48 @@ Change: `agent/main.py` (`PARAMS["early_crop_target"]`, comment cleanup
 for now-inaccurate WHEAT/MELON mentions elsewhere in the file).
 
 Verdict: ADOPTED.
+
+### 2026-08-08  Task 4 (new engine): relabel every old-engine reference number as historical
+
+Brief: the $115,664 ladder median, the d5/d10/d15/d20 cash curve, the
+barnyard census, and the live-meta snapshot were all measured on
+1.32.5. Relabel or remove in the arena output; note prominently in
+`docs/economics.md` and `docs/target-plan.md`; do not calibrate against
+them going forward.
+
+Kept rather than removed - no new-engine equivalent dataset exists yet,
+and a labelled stale reference is still more useful than no reference
+point at all - but relabelled everywhere it appears:
+
+- `arena/metrics.py`: `REAL_MEDIAN_CURVE`'s comment now leads with "OLD
+  ENGINE, HISTORICAL" and explains why (town-centre schedule removal,
+  melon's ~140->30 unit/season collapse as the concrete example).
+  `format_curve()`'s own output now prints two `**` banner lines above
+  the table on every call, and the column header changed from "real
+  median" to "old-engine ref (stale)".
+- `arena/run.py`: the section header changed from "CASH CURVE vs real
+  ladder median" to "CASH CURVE vs OLD-ENGINE HISTORICAL ladder median".
+- `docs/economics.md`: added a top-of-file notice; corrected the town-
+  centre sections in place (2/4/8 units/day -> flat 1; melon's
+  town-centre-only sustainable rate $500-2,000/day -> flat $250/day) with
+  the old numbers kept alongside, explicitly marked, rather than deleted
+  - some readers will want the historical comparison. The shop-only
+  demand table needed no change (unaffected by this engine version).
+  Cross-checked the `structured-economic-policy` citation, which embeds
+  the same now-wrong center formula - flagged as stale in place rather
+  than treated as still-corroborating.
+- `docs/target-plan.md`: added a second, more prominent top-of-file
+  notice (this doc had already been marked "superseded" once, by
+  live-meta, before this session - the engine change invalidates that
+  superseding update too, not just the original barnyard-economist
+  numbers underneath it).
+
+Verified the new arena output directly (`python arena/run.py --quick`) -
+the stale-label banner prints on every run, not just when explicitly
+requested.
+
+Change: `arena/metrics.py`, `arena/run.py`, `docs/economics.md`,
+`docs/target-plan.md`. No `agent/` change (nothing here alters agent
+behaviour, only how it's measured/reported and documented).
+
+Verdict: ADOPTED.

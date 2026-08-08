@@ -8,12 +8,23 @@ lever the policy can pull.
 import math
 from collections import defaultdict
 
-# Real-ladder reference cash curve (notebooks/live-meta, 683 episodes /
-# 1,366 players) - see docs/strategy-log.md "Animal-first meta rebuild".
-# Day N here means "money at the end of day N" (step index N*24 - 1),
-# matching how every prior strategy-log cash-curve table was computed.
-# `final` is the day-29 end-of-episode figure. Not a fitted curve - these
-# are the dataset's own reported median checkpoints.
+# OLD ENGINE, HISTORICAL - kaggle-environments <= 1.32.5. Real-ladder
+# reference cash curve (notebooks/live-meta, 683 episodes / 1,366 players)
+# - see docs/strategy-log.md "Animal-first meta rebuild". Day N here means
+# "money at the end of day N" (step index N*24 - 1), matching how every
+# prior strategy-log cash-curve table was computed. `final` is the day-29
+# end-of-episode figure. Not a fitted curve - these are the dataset's own
+# reported median checkpoints.
+#
+# INVALIDATED 2026-08-08 by the 1.32.6 upgrade (PR #1394): the town centre
+# demand schedule this data's players earned against no longer exists
+# (flat 1/day now, was up to 4x by day 20 - see docs/strategy-log.md
+# "ENGINE UPGRADE"). Every number below reflects an economy melon alone
+# absorbed ~140 units/season from that no longer exists (now 30). Do NOT
+# treat this as a current target - it is kept only so the arena output can
+# still show *some* external reference point, explicitly labelled as
+# stale, until a new-engine equivalent dataset exists (none does yet).
+# See docs/economics.md and docs/target-plan.md for the same caveat.
 CURVE_DAYS = [5, 10, 15, 20]
 REAL_MEDIAN_CURVE = {5: 299, 10: 2212, 15: 21272, 20: 45689, "final": 115664}
 
@@ -141,25 +152,32 @@ HEADLINE = [
 
 
 def format_curve(rows):
-    """Mean bank at each CURVE_DAYS checkpoint plus final, against the real
-    ladder median (REAL_MEDIAN_CURVE) - localises a regression to a specific
-    day instead of only showing up in the final-bank headline. `rows` must
-    all be the same candidate (mix opponents freely - this is our own curve,
-    not a per-opponent one)."""
+    """Mean bank at each CURVE_DAYS checkpoint plus final, against the
+    OLD-ENGINE (pre-1.32.6), HISTORICAL real-ladder median (REAL_MEDIAN_CURVE)
+    - localises a regression to a specific day instead of only showing up
+    in the final-bank headline. `rows` must all be the same candidate (mix
+    opponents freely - this is our own curve, not a per-opponent one).
+
+    The reference column is stale (see REAL_MEDIAN_CURVE's own comment) -
+    do not calibrate against it or treat "ours/real" as a real target
+    ratio. Kept, clearly labelled, only because no new-engine equivalent
+    dataset exists yet."""
     if not rows:
         return "(no episodes)"
-    out = ["  day    ours       real median   ours/real"]
+    out = ["  ** reference column is OLD ENGINE (pre-1.32.6), HISTORICAL -",
+           "  ** do not calibrate against it. See docs/economics.md.",
+           "  day    ours       old-engine ref (stale)   ours/ref"]
     for d in CURVE_DAYS:
         vals = [r["curve"][d] for r in rows if d in r.get("curve", {})]
         if not vals:
             continue
         mean = sum(vals) / len(vals)
         ref = REAL_MEDIAN_CURVE[d]
-        out.append(f"  {d:<6} {mean:>10.0f}   {ref:>11}   {mean/ref:>6.2f}x")
+        out.append(f"  {d:<6} {mean:>10.0f}   {ref:>21}   {mean/ref:>6.2f}x")
     finals = [r["final_bank"] for r in rows]
     fmean = sum(finals) / len(finals)
     fref = REAL_MEDIAN_CURVE["final"]
-    out.append(f"  final  {fmean:>10.0f}   {fref:>11}   {fmean/fref:>6.2f}x")
+    out.append(f"  final  {fmean:>10.0f}   {fref:>21}   {fmean/fref:>6.2f}x")
     return "\n".join(out)
 
 

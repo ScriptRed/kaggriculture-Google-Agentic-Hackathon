@@ -5,6 +5,18 @@ All figures below were derived from the environment source
 competition page. Where the two disagree, the source wins.
 `tests/test_constants.py` pins our tables to it.
 
+> **ENGINE VERSION NOTICE (2026-08-08).** kaggle-environments 1.32.6
+> (PR #1394) removed the town-centre demand schedule this whole
+> "Correction (2026-08-07)" section was derived against - it used to
+> double at day 10 and again at day 20 (1x -> 2x -> 4x); it is now a flat
+> 1 unit/day, forever. Every dollar figure below that includes a town-
+> centre component (marked inline) is **OLD ENGINE, HISTORICAL** - do not
+> calibrate against it. The shop-only figures (the "shop component only"
+> table) are unaffected - `townShopSellInterval`/`townShopUnlockInterval`
+> did not change. See `docs/strategy-log.md` "ENGINE UPGRADE" for the
+> full diff and verification, and `docs/target-plan.md` for the same
+> caveat applied to the barnyard-census target plan.
+
 ## Correction (2026-08-07): sustainable revenue replaces yield x price
 
 The previous version of this document ranked crops by
@@ -30,15 +42,18 @@ kaggriculture.py):
   single-product shop). One new shop unlocks every `townShopUnlockInterval`
   days (default 3), chosen **uniformly at random** from the 8 shops in
   `SHOPS`, so by day 24 (8 x 3) all of them are open.
-- **Town centre.** Every `townCenterSellInterval` turns (default 12 -> 2
-  ticks/day), it consumes 1 of *every* product except fertilizer, and that
-  multiplies x2 from day 10 and x4 from day 20
-  (`TOWN_CENTER_DEMAND_SCHEDULE`).
+- **Town centre.** Every `townCenterSellInterval` turns (default 24 -> 1
+  tick/day as of kaggle-environments 1.32.6; was 12 -> 2 ticks/day, see the
+  notice above), it consumes 1 of *every* product except fertilizer - flat,
+  no day-dependent multiplier anymore (`TOWN_CENTER_DEMAND_SCHEDULE`, which
+  used to hold that multiplier, was removed from the engine and no longer
+  exists in `agent/constants.py` either).
 
 Both are transcribed verbatim (`SHOP_UNLOCK_INTERVAL`,
 `SHOP_SELL_TICKS_PER_DAY`, `CENTER_SELL_TICKS_PER_DAY`,
-`TOWN_CENTER_DEMAND_SCHEDULE`, `TOWN_CENTER_PRODUCTS`) and asserted equal to
-the source in `test_town_center_schedule_matches_env`.
+`TOWN_CENTER_PRODUCTS`) and asserted equal to the source in
+`test_town_center_products_match_env` /
+`test_town_center_is_flat_one_per_day`.
 
 **Which** shop unlocks on which day is random per episode, so a pure
 `(item, day)` function can't know it exactly. But the unlock order is a
@@ -77,29 +92,37 @@ only be absorbed by the town centre.
 
 ### The town centre floor (applies to every item, including melon)
 
-The centre adds `2 -> 4 -> 8` units/day (day <10 / 10-19 / >=20) of demand
-for every product except fertilizer - small next to a popular shop item's
-demand, but **the entire demand curve for melon**:
+**OLD ENGINE, HISTORICAL - see the notice at the top of this file.** Prior
+to 1.32.6, the centre added `2 -> 4 -> 8` units/day (day <10 / 10-19 /
+>=20) of demand for every product except fertilizer:
 
-| Day range | Melon centre demand/day | Melon sustainable $/day |
+| Day range | Melon centre demand/day (old) | Melon sustainable $/day (old) |
 |---|---:|---:|
 | 0-9 | 2 | 500 |
 | 10-19 | 4 | 1,000 |
 | 20-29 | 8 | 2,000 |
 
-Two things make this worse than the headline $500-2,000/day suggests:
+**Current (1.32.6+): flat 1 unit/day, every day** - melon sustainable
+$/day is a flat **$250** (1 x base $250), season total 30 units vs the
+old 140 (an 88.6% cut - see `docs/strategy-log.md` "ENGINE UPGRADE" and
+"Task 1 (new engine): melon..."). Removed from the production plan
+entirely as a result (`agent/main.py PARAMS["early_crop_target"]`), not
+just repriced downward.
+
+Two things made this worse than the headline dollar figure suggests, and
+still do:
 
 1. **It's shared with the opponent.** Both farms sell into the same market,
    so this is the *combined* sustainable rate, not per-player.
 2. **Melon can't be harvested before day 10** (`first_yield_day: 10`), and a
-   worked 5x5 field produces far more than 2-4 melons at once - one field at
-   `~0.55 yield/tile/day` over even a partial matured batch is 10-15+ melons
-   landing in the shed the same day. A field that size floods the melon
-   market instantly: `above_target` for melon is `3.60` with a **quadratic**
+   worked field produces far more than a day's demand at once - a batch of
+   several tiles landing in the shed the same day floods the melon market
+   instantly: `above_target` for melon is `3.60` with a **quadratic**
    (`sq`) shape, the steepest crash curve of any product. The old doc's
-   "melon trap" observation was directionally right but underpriced - melon
-   isn't merely glut-prone, its buyer base is one thin, shared, day-gated
-   channel.
+   "melon trap" observation was directionally right but underpriced even
+   before the engine change - melon isn't merely glut-prone, its buyer
+   base is one thin, shared, day-gated channel, now four times thinner
+   again on top of that.
 
 Wheat and eggs sit at the other extreme: high shop demand (30/day, 12/day)
 *and* the gentlest glut curve (`log`, target 0.20) - they're the only two
@@ -134,16 +157,21 @@ Per `prompts/next.md`, checked against three independent sources.
   notebook doesn't compute a demand-rate table, but every qualitative claim
   it makes agrees with the derivation above. **Corroborates.**
 - **`structured-economic-policy`** contains a working agent with a
-  `_town_demand_per_day(obs, item)` function. Transcribed:
+  `_town_demand_per_day(obs, item)` function. Transcribed (**OLD ENGINE,
+  HISTORICAL** - the `center` term below used the pre-1.32.6 day-10/day-20
+  doubling and is now wrong; the `shop` term is unaffected and still
+  correct today):
   `center = 0 if item=="FERTILIZER" else 2*(4 if day>=20 else 2 if day>=10
   else 1)`, `shop = sum(12 if single-product else 6 for unlocked shops
-  selling item)`. This is **the same formula**, derived independently, down
-  to the per-tick constants (their 12/6 = our `SHOP_SELL_TICKS_PER_DAY (6) x
-  _shop_unit_rate (2 or 1)`). It reads `obs["town"]["unlocked_shops"]`
-  live rather than modelling the unlock-day expectation, which is exactly
-  the distinction `sustainable_rate`'s `unlocked_shops` parameter captures.
-  **Corroborates, strongest source** (matches at the code level, not just
-  the conclusion).
+  selling item)`. This was **the same formula** as ours at the time,
+  derived independently, down to the per-tick constants (their 12/6 = our
+  `SHOP_SELL_TICKS_PER_DAY (6) x _shop_unit_rate (2 or 1)`). It reads
+  `obs["town"]["unlocked_shops"]` live rather than modelling the
+  unlock-day expectation, which is exactly the distinction
+  `sustainable_rate`'s `unlocked_shops` parameter captures.
+  **Corroborated at the time** (matched at the code level, not just the
+  conclusion) - this notebook's own published agent is now stale in the
+  same way our pre-upgrade code was, for the same reason.
 - **`moon-counts-melons`**: despite the name, this notebook is **not** about
   crop economics. It's a mirror/opponent-detection routing scheme (delay a
   market counterfactual until 4 shops are visible, branch on the visible

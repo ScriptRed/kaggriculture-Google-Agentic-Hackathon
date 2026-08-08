@@ -1,5 +1,21 @@
 # Target production plan
 
+> **ENGINE VERSION NOTICE (2026-08-08, second update).** kaggle-environments
+> 1.32.6 (PR #1394) removed the town-centre demand schedule this entire
+> document - including the "superseded by real ladder data" update directly
+> below, and the $115,664 ladder-median / $195-202k route figures throughout
+> - was built against. Melon's season-long town demand alone dropped from
+> ~140 units to 30 (see `docs/strategy-log.md` "ENGINE UPGRADE"), and melon
+> has been removed from the production plan entirely as a result (not
+> merely bounded, as this doc's own "12-tile burst" recommendation says
+> below). **Every dollar figure and every crop/animal target number in this
+> file is OLD ENGINE, HISTORICAL.** Do not calibrate against it or treat it
+> as a current target - kept for its still-relevant methodology (evidence-
+> quality grading, the gap-analysis structure) and as a record of what the
+> pre-upgrade meta looked like. A new-engine equivalent does not exist yet
+> (Task 2, `docs/strategy-log.md`, is the live-shop-reading response to
+> this same engine change).
+
 ## 2026-08-08 update: superseded by real ladder data (notebooks/live-meta)
 
 Everything below this note was built from a **single recorded route**
