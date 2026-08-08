@@ -138,6 +138,49 @@ def test_sustainable_rate_live_mode_matches_manual_count():
         C.CENTER_SELL_TICKS_PER_DAY * 1
 
 
+def test_sustainable_rate_live_mode_counts_duplicates():
+    """A shop drawn twice (with-replacement mechanic) consumes twice -
+    each list entry contributes its own rate independently."""
+    unlocked = ["YARN_STORE", "YARN_STORE", "YARN_STORE"]
+    assert C.sustainable_rate("WOOL", 5, unlocked_shops=unlocked) == \
+        C.CENTER_SELL_TICKS_PER_DAY * 1 + 3 * C.SHOP_SELL_TICKS_PER_DAY * 2
+
+
+def test_planning_rate_at_zero_known_matches_full_season_expectation():
+    """No shops unlocked yet (0 known, all MAX_SHOP_INSTANCES remaining):
+    planning_rate assumes the full season's worth of draws will
+    eventually happen (matches sustainable_rate's expected mode evaluated
+    once shops_unlocked_by_day saturates, i.e. day >= 24) - the right
+    question for "is this worth planting for its whole lifetime", not "is
+    a shop unlocked at this literal instant". "Hedge early" falls out of
+    the algebra (full population-average weight when nothing is known
+    yet), not a tuned day cutoff.
+    """
+    for item in ("WHEAT", "STRAWBERRY", "CARROT", "WOOL"):
+        assert C.planning_rate(item, []) == pytest.approx(
+            C.sustainable_rate(item, day=24))
+
+
+def test_planning_rate_at_full_known_matches_live_mode():
+    """All MAX_SHOP_INSTANCES shops drawn: planning_rate should equal the
+    live-exact rate - "specialise once shops reveal", also falling out of
+    the algebra (zero remaining slots contribute zero expectation)."""
+    unlocked = ["YARN_STORE"] * C.MAX_SHOP_INSTANCES
+    for item in ("WHEAT", "WOOL", "STRAWBERRY"):
+        assert C.planning_rate(item, unlocked) == pytest.approx(
+            C.sustainable_rate(item, day=27, unlocked_shops=unlocked))
+
+
+def test_planning_rate_is_between_known_and_full_expectation():
+    """Partially revealed (some known, some remaining): result should sit
+    between "nothing known yet" and "fully known" - a real interpolation,
+    not clamped to one end."""
+    none_known = C.planning_rate("WOOL", [])
+    some_known = C.planning_rate("WOOL", ["YARN_STORE", "YARN_STORE"])
+    all_known = C.planning_rate("WOOL", ["YARN_STORE"] * C.MAX_SHOP_INSTANCES)
+    assert none_known < some_known < all_known
+
+
 def test_sustainable_rate_steady_state_matches_full_shop_rate():
     """By day 24, MAX_SHOP_INSTANCES (8) draws have happened in expectation
     (min(8, 24//3) == 8) - in expectation this is the same total shop rate

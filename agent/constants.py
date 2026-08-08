@@ -160,6 +160,43 @@ def sustainable_rate(item, day, unlocked_shops=None):
     return center + shop
 
 
+def planning_rate(item, unlocked_shops):
+    """Units/day `item`'s absorption is *expected to average out to* over
+    the rest of a shop-drawing episode, given what's unlocked so far -
+    the number to plant/breed against, as opposed to `sustainable_rate`'s
+    live mode (the number to sell against *right now*).
+
+    Selling wants the exact current rate: dumping today can only be
+    absorbed by shops that exist today. Planting doesn't - a crop or
+    animal started now pays off over many future days, by which time more
+    of the MAX_SHOP_INSTANCES draws will have resolved, so judging a
+    still-unknown crop only by what's unlocked at the moment of planting
+    (day 0-2: usually nothing at all, since the first shop doesn't unlock
+    until SHOP_UNLOCK_INTERVAL) systematically underrates everything and
+    collapses the "which crop" decision to noise.
+
+    Blends what's *known* (shops already drawn - counted exactly, same as
+    `sustainable_rate`'s live mode) with the *expected* contribution of
+    the shops that haven't been drawn yet (`MAX_SHOP_INSTANCES -
+    len(unlocked_shops)` remaining instances, each an independent uniform
+    draw - same linearity-of-expectation argument as `sustainable_rate`'s
+    no-`unlocked_shops` mode, just applied to the remaining slots only
+    instead of all of them). This is the same "hedge early, specialise as
+    shops reveal" curve the brief asked for, and it falls out of the
+    algebra rather than needing a tuned blend weight: at day 0 (0 known,
+    8 remaining) it equals the pure population-expectation rate; once all
+    8 have been drawn (0 remaining) it equals the pure live rate; every
+    point in between is a weighted mix in exact proportion to how much is
+    actually known yet.
+    """
+    center = CENTER_SELL_TICKS_PER_DAY if item in TOWN_CENTER_PRODUCTS else 0
+    known = sum(SHOP_SELL_TICKS_PER_DAY * _shop_unit_rate(s)
+                for s in unlocked_shops if item in SHOPS.get(s, ()))
+    remaining = max(0, MAX_SHOP_INSTANCES - len(unlocked_shops))
+    expected_remaining = _item_shop_full_rate(item) * remaining / len(SHOPS)
+    return center + known + expected_remaining
+
+
 # --- price model -----------------------------------------------------------
 
 def _shape(func, x):
