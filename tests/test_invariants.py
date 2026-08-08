@@ -178,17 +178,13 @@ MARKET_VERBS = {"HIRE", "BUY_LAND", "BUY_SEED", "BUY_PRODUCT", "BUY_ANIMAL", "SE
 # 1 of 1,366 players ever sold an egg), animal composition is COW/SHEEP
 # only - no GOOSE, so no COOP is ever built. Deliberate, not a regression.
 #
-# DROP: reached only via _assign's idle-unit fallback (a unit with nothing
-# higher-scored to do, carrying something sellable). The 14-animal herd
-# plus early crops keep every unit saturated with higher-priority work on
-# this probe seed - noop_rate measured at 0.04% (essentially never idle).
-# Not a correctness bug: the env's automatic end-of-day sweep still moves
-# carried inventory to the shed every night regardless of whether DROP
-# ever fires, so nothing is lost permanently - only the same-day capital
-# velocity DROP exists for is. A real, small, honestly-measured trade-off
-# against the much larger gain from the herd/fertilizer work, not chased
-# further this session - see docs/strategy-log.md.
-KNOWN_UNCOVERED = {"FERTILIZE", "BUILD_COOP", "DROP"}
+# DROP was here (reached only via _assign's idle-unit fallback) while
+# hands stayed saturated with higher-priority work under the pre-Task-1
+# hiring gate. The day-9 cascade fix (target-plan rebuild, Task 1) sizes
+# hiring to the day's actual rescue-tier workload instead of a flat
+# floor, which incidentally freed up enough idle capacity for DROP to
+# fire again - removed from here the same commit, per the rule above.
+KNOWN_UNCOVERED = {"FERTILIZE", "BUILD_COOP"}
 
 
 def test_every_action_verb_is_exercised():

@@ -27,7 +27,7 @@ for _p in (_HERE, "/kaggle_simulations/agent", os.getcwd()):
 from constants import (  # noqa: E402
     CROPS, ANIMALS, MOVES, LAND_PRICES, MARKET_PARAMS,
     market_price, marginal_price_after, bonus_window, harvest_age,
-    hire_cost, sustainable_rate,
+    hire_cost, cumulative_hire_cost, sustainable_rate,
 )
 
 PASS = ["PASS"]
@@ -48,6 +48,8 @@ PARAMS = {
                                  # absorption-metered ongoing sells (MILK/
                                  # WOOL) - see _sell_plan.
     "seed_buffer": 6,           # keep this many seeds of the active early crop
+    "seed_trickle_cap": 3,      # small top-up ceiling when the full buffer
+                                 # purchase isn't affordable - see step 4.
     "capital_reserve": 1200,    # cash floor for land/animal/seed spend
     "tiles_per_unit": 4,        # cap on simultaneous plants+held-seed per
                                  # farmer/hand - see _market_orders step 3.
@@ -632,7 +634,7 @@ def _assign(units, tasks, board_size, inventories=None, prices=None):
 
 # --- market ----------------------------------------------------------------
 
-def _market_orders(obs, farm, private, day, hour, inventories=None):
+def _market_orders(obs, farm, private, day, hour, inventories=None, tasks=None):
     orders = []
     money = farm["money"]
     shed = private.get("shed", {}) or {}
@@ -658,12 +660,34 @@ def _market_orders(obs, farm, private, day, hour, inventories=None):
     # deliver it. animals_lost 19-22/game traced directly to this. A tiny
     # floor here is negligible next to any real purchase but is the
     # difference between 1 unit and 3 on the worst days.
+    #
+    # Even that wasn't enough at 14 animals split across separate corners
+    # of the board: traced directly (day 8, seed 11) - 8 animals
+    # simultaneously needed FEED (all rescue-tier, score 100) but only 3
+    # hands existed that day (the flat floor above covers ~2-3 hires); a
+    # 6-animal cluster got serviced by hour 20, two more distant sheep
+    # never did and escaped the next morning - confirmed via fed_today,
+    # not a feed-supply problem (shed held 5-13 WHEAT the entire day,
+    # never empty). The greedy per-turn assignment has no notion of
+    # "make sure every urgent task gets covered today," only "assign the
+    # nearest reachable one" - so with too few units, an entire cluster
+    # can go untouched all day even while wheat sits unused. Size the
+    # hire budget to the day's actual rescue-tier workload directly,
+    # rather than guess a flat floor: cheap insurance against exactly
+    # this failure, since hire_cost is fib-cheap next to a $400-500
+    # animal.
     if hour == 0:
         seed_floor = (CROPS[crop]["seed"] * 2) if crop else 20
         budget = max(
             min(money * PARAMS["hand_budget_frac"], max(0, money - seed_floor)),
             min(money, 4),
         )
+        urgent = len({pos for score, pos, _ in (tasks or []) if score >= 100})
+        if urgent > 0:
+            target_urgent_hands = min(hires_today + urgent, PARAMS["target_hands"])
+            urgent_cost = (cumulative_hire_cost(target_urgent_hands)
+                           - cumulative_hire_cost(hires_today))
+            budget = max(budget, min(money, urgent_cost))
         spent = 0
         n = hires_today
         while n < PARAMS["target_hands"]:
@@ -719,22 +743,34 @@ def _market_orders(obs, farm, private, day, hour, inventories=None):
             orders.append(["BUY_PRODUCT", "WHEAT", buy])
             money -= price * buy
 
-    # 4. keep seeds stocked. Two things, kept deliberately separate:
+    # 4. keep seeds stocked. Three things, kept deliberately separate:
     #
     # (a) a cap on *simultaneous* plants+held-seed relative to hand count,
     #     independent of cash. Fixes overplanting - see the tiles_per_unit
     #     comment above.
-    # (b) the cash gate. Private seeds start at 0 for every crop (env
-    #     source), so this is the only bootstrap out of a cold start and
-    #     must never be permanently blocked - but only in that exact state
-    #     (nothing planted, nothing held). Everywhere else, this is exactly
-    #     the original all-or-nothing capital_reserve check, unchanged. The
-    #     trickle fallback only fires when we're completely out of seed
-    #     (not just "below the buffer") - _market_orders runs every hour, so
-    #     a trickle gated on "any room" fires repeatedly per day as tiles
-    #     free up and drains far more cash than one seed's worth: tried it,
-    #     cost -156 coins paired vs v1 from hire budget starving as money
-    #     bled out (see docs/strategy-log.md).
+    # (b) the cash gate for the full top-up to `seed_buffer`. Unchanged
+    #     from the original all-or-nothing `capital_reserve` check.
+    # (c) a capped trickle when the full top-up isn't affordable. This
+    #     used to only fire at *exactly* zero held seed - found (target-
+    #     plan rebuild, Task 1 investigation) that this leaves a real gap:
+    #     held count settles at 1-2 (never fully zero, since the trickle
+    #     itself refills it slightly, but never zero) while `capital_
+    #     reserve`'s $1,200 headroom requirement is far out of reach for
+    #     most of the game's cash-poor early trough. Confirmed directly
+    #     (seed 11): WHEAT seed count stuck at 1 and MELON at 2 for the
+    #     entire days 1-9 window, while tile counts decayed toward 0 as
+    #     existing plants matured and harvested with nothing replacing
+    #     them - `_pick_crop`'s gap kept growing (5 -> 13 for WHEAT) the
+    #     whole time, correctly *requested*, never *achieved*. Not a
+    #     labour/capacity problem - `capacity` (the tiles_per_unit cap in
+    #     (a)) stayed positive (2-24) throughout the same window.
+    #     Widened to top up toward `seed_trickle_cap` (well under the full
+    #     `seed_buffer`) whenever affordable, not just at zero - small and
+    #     capped, so this isn't the same uncapped "any room" drain an
+    #     earlier version of this trickle was reverted for (cost -156
+    #     coins paired, see docs/strategy-log.md): that one re-fired for
+    #     the *entire* remaining buffer gap every hour a tile freed up;
+    #     this one only ever tops up to a small fixed ceiling.
     if crop:
         n_units = 1 + len(farm.get("hands", []))
         in_flight = sum(seeds.values()) + sum(
@@ -747,8 +783,11 @@ def _market_orders(obs, farm, private, day, hour, inventories=None):
         if want > 0 and cost > 0:
             if money > cost * want + PARAMS["capital_reserve"]:
                 orders.append(["BUY_SEED", crop, want])
-            elif seeds.get(crop, 0) == 0 and money >= cost:
-                orders.append(["BUY_SEED", crop, 1])
+            else:
+                top_up = min(want, PARAMS["seed_trickle_cap"] - seeds.get(crop, 0))
+                buy = min(top_up, int(money // cost))
+                if buy > 0:
+                    orders.append(["BUY_SEED", crop, buy])
 
     # 5. land, then animals. One BUY_ANIMAL per call (the biggest deficit,
     # from _animal_deficit) rather than the whole target at once - this
@@ -862,7 +901,7 @@ def _agent(obs):
 
     tasks = _build_tasks(obs, farm, private, day, board_size, inventories)
     actions = _assign(units, tasks, board_size, inventories, prices)
-    market = _market_orders(obs, farm, private, day, hour, inventories)
+    market = _market_orders(obs, farm, private, day, hour, inventories, tasks)
 
     return {
         "farmer": actions[0] if actions else PASS,

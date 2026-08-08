@@ -1830,3 +1830,153 @@ wheat-pickup runner scaling, `COLLECT_FERTILIZER` priority),
 regression test, committed separately to `main`).
 
 Verdict: ADOPTED.
+
+### 2026-08-08  Task 1: the day-9 cascade - hypothesis partially confirmed, root cause was labour not feed supply
+
+Brief's hypothesis: `wheat depletes to 0 on day 9 -> animals go unfed ->
+sheep escape -> wool gone for 5 days -> day-10 compounding never starts`.
+Traced directly against seed 11 (`v5-animal-first-meta`, the frozen
+baseline this fix is measured against) before changing anything, per the
+brief's own instruction ("if it doesn't hold, say so"). **The chain does
+not hold as stated** - shed `WHEAT` never reached 0 in the critical day-8
+window (stayed 5-13 units all day, confirmed via `fed_today` tracking on
+the actual animal tiles). Two different, evidenced root causes instead:
+
+**Q1/Q2 - why do WHEAT/MELON tiles stall well under target (8/14,
+3/12)?** Not a labour/tile-capacity problem - the `tiles_per_unit` cap
+(`n_units * 4 - in_flight`) stayed positive (2-24) throughout days 1-9,
+confirmed by direct trace. The real cause: seed-buying's cash gate
+(`money > cost*want + capital_reserve($1,200)`) almost never clears
+during the cash-poor early trough ($7-450 range), and the *only* fallback
+- a one-seed trickle - fired solely at `seeds_held == 0`. Held count
+settles at 1-2 (the trickle itself keeps it just above zero) and never
+hits the exact trigger, so `_pick_crop`'s gap grows correctly (5 -> 13,
+confirming the target *was* being requested) but is never closed. Fixed:
+widened the trickle to a capped top-up (`seed_trickle_cap=3`, still small
+enough to avoid the uncapped-trickle drain an earlier attempt at this was
+reverted for, -156 coins paired, logged above).
+
+**Q2 continued - why does MELON stall harder than WHEAT (3/12 vs
+8/14)?** Not measured by this fix, but root-caused for the record since
+the brief asked to "name which, per constraint": `_market_orders` step 4
+buys seed for exactly one crop per call - whichever `_pick_crop` says has
+the bigger gap. WHEAT (max_yield_day=4, seed cost $10) cycles roughly 3x
+faster than MELON (max_yield_day=12, seed cost $80, 8x more expensive per
+seed), so WHEAT's gap reopens far more often and wins the single seed-buy
+slot almost every call - both a **priority-competition** constraint (not
+labour, not tile availability) and a **cost-asymmetry** constraint (the
+same cash gate is 8x harder for MELON to clear). Not fixed this session -
+letting both crops share the seed-buying turn is a distinct hypothesis
+from the trickle-cap fix above and deserves its own branch/measurement
+(one hypothesis per branch); flagged for a follow-up. `route-proxy` has
+the identical single-crop-per-turn pattern (its own `_crop_to_plant`),
+so this likely also caps Task 2's rebuild.
+
+**Q3 - are we trying to grow feed we should be buying?** Already
+resolved before this session started: `_market_orders` step 3
+(`BUY_PRODUCT WHEAT`, protected priority ahead of seed/land/animal spend)
+already buys whatever wheat is affordable toward `_wheat_needed(farm)`
+(1/animal/day) every turn. The `early_crop_target` WHEAT batch (14 tiles)
+is deliberately bounded and one-time, not sized to season demand - this
+was the "animal-first meta rebuild" entry's fix #2, unchanged here. No
+code change needed for this question; confirmed still correct by reading
+the current source.
+
+**Q4/animal deaths - why did sheep go unfed and escape (day 8-9, seed
+11)?** Not a feed-supply problem (as above). Direct trace: 8 animals
+simultaneously needed FEED (all rescue-tier, score 100), split across two
+spatially separate clusters, but only 3-4 hands existed that day (the
+flat hire floor covers ~2-3 hires; `target_hands=8` was never reached).
+The greedy nearest-first scheduler fully serviced the larger/closer
+6-animal cluster (done by hour 20) and never touched the isolated 2
+sheep all day - not a scheduler bug exactly, a capacity one: too few
+units for the day's actual urgent workload. Fixed: size the hire budget
+to the day's count of urgent (score >= 100) task positions
+(`cumulative_hire_cost`), on top of the existing flat floor, so a
+labour-heavy day gets the hands it needs instead of a flat guess.
+
+**The "one architectural gap" question.** Animal deaths (this fix) and
+the elevated movement share found in Task 3's fresh-replay analysis
+(`docs/ladder-observations.md`, 78.2% of our actions are movement vs
+opponents' 53.4%) trace to the same mechanism: the greedy per-turn
+scheduler re-decides every unit's task fresh each turn with no
+multi-turn commitment or route memory, so coverage gaps (animals) and
+backtracking (movement share) are two symptoms of one gap, not two bugs.
+`noop_rate`, by contrast, does *not* show up as elevated in real ladder
+play (Task 3: our PASS rate is 0.1-1.0% across all 10 fresh replays,
+opponents' is 0-50%) - the "high noop_rate" concern was very likely a
+correct read of one specific self-play condition (idle hands during a
+cash-poor trough, confirmed directly: seed 11 vs `v5-animal-first-meta`,
+day 3, 1 sheep lost, `money=$10`, wheat healthy, only 3 hands), not a
+general property against real opponents. Two problems from one
+architectural gap, not three - `noop_rate` doesn't belong in that group
+on the evidence gathered so far.
+
+**Results.** `animals_lost` reaches a clean **0/8 seeds vs `starter`**
+(full elimination against a weak/non-competing opponent for feed). It is
+not fully 0 in matched-strength self-play - **2.68 mean vs
+`v5-animal-first-meta`** (96 episodes, `--compare`), consistent with
+harder competition for the same wheat market when both players are
+buying simultaneously. Reported plainly, not smoothed over: this is a
+real, remaining gap, most plausibly the same architectural scheduler
+limit as above compounded by opponent demand, not yet fully closed.
+
+Cash curve, day 10 (the number the brief asked to prioritize above
+everything else), 8 seeds vs `starter`:
+```
+day    real median   ours (before)   ours (after)
+ 5           299             288            201
+10         2,212             261          1,505    <- 8.5x behind -> 1.5x behind
+15        21,272           3,348         17,732    <- 6.4x behind -> 1.2x behind
+20        45,689          14,282         31,426    <- 3.2x behind -> 1.5x behind
+final    115,664          49,891         70,280    <- 2.3x behind -> 1.6x behind
+```
+Day 10 goes from 8.5x behind the real median to 1.5x behind - the
+clearest single number in this entry, matching exactly what the brief
+asked to be judged on.
+
+**Primary metric - paired bank differential vs `v5-animal-first-meta`**
+(96 episodes, `--compare`):
+```
+mean +7,257.7   sd 9,941.1   se 1,014.6
+95% CI [+5,243.4, +9,271.9]
+paired t-test  t=+7.153   p=1.75e-10
+wilcoxon       z=+6.338   p=2.32e-10
+win rate 86.5%
+animals_lost 2.677 (mean, this matchup only)
+```
+Clean pass on the acceptance bar (CI excludes zero, both tests agree,
+point estimate >> the ~50-coin MDE).
+
+**Full pool** (`make arena`, current `DEFAULT_OPPONENTS`, 48 seeds):
+```
+                    win rate    mean bank   animals_lost
+vs starter             100.0%      69,646          0.19
+vs random_seeded       100.0%      69,672          0.16
+vs v5-animal-first-meta 86.5%      51,069          2.68
+vs animal-heavy         94.8%      51,009          2.85
+vs melon-rush          100.0%      69,119          0.22
+vs market-dumper       100.0%      69,466          0.23
+vs route-proxy         100.0%      66,660          1.26
+
+OVERALL WIN RATE  97.3%   (672 episodes)   mean final bank 63,806
+```
+`animals_lost` overall mean 1.083 (down from ~3/game at the start of this
+session's investigation) - close to 0 against every opponent that isn't
+directly competing for the same wheat market, and still meaningfully
+above 0 (2.68-2.85) against the two self-play-like opponents
+(`v5-animal-first-meta`, `animal-heavy`). `plants_weeded` rose to 8.91
+against `animal-heavy` specifically (0.00 everywhere else) - noted
+plainly as a regression in that one matchup, not investigated further
+this session; flagged for a follow-up rather than silently accepted.
+
+Change: `agent/main.py` (`PARAMS["seed_trickle_cap"]`, step 4 seed-buying
+trickle widened, step 1 hire budget sized to urgent-task count via new
+`cumulative_hire_cost` import), `tests/test_invariants.py`
+(`KNOWN_UNCOVERED` - `DROP` removed, now fires), `arena/metrics.py` /
+`arena/run.py` (Task 4: `CURVE_DAYS`/`REAL_MEDIAN_CURVE`/`format_curve` -
+every arena run now reports the bank curve at d5/10/15/20/final against
+the real ladder median, not just final bank), `docs/ladder-observations.md`
+(Task 3: ten fresh replay analysis, appended below).
+
+Verdict: ADOPTED.

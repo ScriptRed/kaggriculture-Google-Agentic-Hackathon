@@ -31,6 +31,7 @@ sys.path.insert(0, str(ROOT))
 
 from arena.metrics import (  # noqa: E402
     episode_metrics, format_summary, differential_report, format_differential,
+    format_curve,
 )
 
 SEEDS = [
@@ -218,6 +219,9 @@ def main():
     overall = 100 * sum(r["result"] for r in rows) / len(rows)
     print(f"\nOVERALL WIN RATE  {overall:.1f}%   ({len(rows)} episodes)\n")
     print(format_summary(rows))
+    print(f"\nCASH CURVE vs real ladder median (notebooks/live-meta, all "
+          f"{len(rows)} episodes, all opponents combined):")
+    print(format_curve(rows))
 
     if args.json:
         payload = {

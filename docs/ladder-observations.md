@@ -190,3 +190,142 @@ these are strategic disagreements about which crop or animal to favor —
 they're missing mechanics, straightforwardly fixable, and the replay
 evidence says fixing them would matter more than any opponent-pool or
 PARAMS tuning we've done so far this session.
+
+## 2026-08-08 update: ten fresh v5 replays (Task 3)
+
+Ten new episodes (91044484 through 91080779, listed in `my_seats.csv`
+rows 8-17), all played by the already-submitted **v5-animal-first-meta**
+build - post animal-pipeline, post the wheat-feed-priority fix, pre this
+session's Task 1 seed-trickle/urgent-hiring fix. Opponent logs are 403
+(unavailable), so everything below comes from the replay's public
+`observation` block only. Sampling caveat learned the hard way earlier
+this session and re-applied here: `hands` resets to `[]` at hour 0 every
+night regardless of true daily hand count, so every hand-count sample
+below is taken at hour 4, never hour 0 - an early pass at this sampled
+hour 0 and wrongly concluded the strongest opponent ran the entire game
+on 1 unit (`hands=0` throughout); resampling at hour 4 showed 8-10 hands
+by day 3, caught before it was reported. Animal/crop/money fields are not
+subject to this reset and were sampled at hour 0 as usual.
+
+**Record and bank.** 5-5 (opponent logs unavailable, so this is bank
+comparison, not the engine's own win/loss - "win" here means
+`my_final > opp_final`). Mean final bank: **ours $36,319 vs opponents'
+$36,576** - close to parity, not the 43%-of-median gap the session
+opened with. That's not a contradiction: these ten opponents are drawn
+from ladder matchmaking *at our current rating*, so near-parity is what
+matchmaking is supposed to produce - this sample measures relative
+dynamics against similarly-rated opponents, not distance from the top of
+the ladder. Individual spread is wide: two opponents finish weak ($8,953,
+$9,673 - 7-8% of the $115,664 median) and we beat both by 4-5x; one
+finishes strong ($92,953 - 80.4% of the median, the closest any replay
+this project has seen to real top-of-ladder play) and beats us 2.3x.
+
+**Day-by-day divergence, mean of all 10 (`me` vs `opp`):**
+
+| day | me | opp | opp - me |
+|---|---|---|---|
+| 5 | 260 | 666 | +406 |
+| 10 | 228 | 816 | +588 |
+| 14 | 2,182 | 6,726 | **+4,545 (peak)** |
+| 15 | 3,138 | 7,524 | +4,386 |
+| 20 | 10,578 | 11,034 | +457 |
+| 21 | 13,719 | 12,773 | **-946 (we take the lead)** |
+| 29 | 33,877 | 32,528 | -1,349 |
+
+Opponents pull ahead almost immediately (day 1: +594) and the gap widens
+through day 8-14, peaking at **+4,545 on day 14** - the same mid-game
+window Task 1 root-caused (day 8-9 cascade, hire-budget/seed-trickle
+starvation). It then closes steadily and **we take the lead on day 21**,
+holding it through the end. This is a real, opponent-verified instance of
+the same shape found in the arena's own cash-curve work: a strong,
+front-loaded opening that's competitive early, a mid-game trough where
+real opponents' compounding outruns ours, and a partial-to-full recovery
+late. Unlike the arena's `starter`/`v5` comparisons, this is against real
+human-authored strategies, and the mid-game trough here is *deeper in
+absolute terms* (peak deficit $4,545) even though we finish ahead on
+average - the trough is the actual problem, not the final score.
+
+**Action distribution, aggregated across all 10 (post-animal-pipeline -
+not comparable to the 7-replay table above, which predates it):**
+
+| action | us | opponents |
+|---|---|---|
+| Movement (N/S/E/W combined) | **78.2%** | **53.4%** |
+| PASS (noop) | 0.3% | 10.9% |
+| WATER | 2.0% | 9.9% |
+| PLANT | 1.1% | 4.9% |
+| COLLECT_FERTILIZER | 5.6% | 3.6% |
+| FEED | 4.0% | 3.9% |
+| PICKUP | 3.2% | 3.5% |
+| HARVEST | 2.5% | 3.4% |
+| CARE | 2.2% | 4.3% |
+
+Two findings, one confirming a prior worry and one correcting a different
+one:
+
+- **Movement share got worse, not better, after the animal pipeline
+  shipped.** The old 7-replay sample (pre-pipeline) had us at 54.8%
+  movement vs opponents' 41.7% (a 13pp gap). Post-pipeline, we're at
+  78.2% vs 53.4% (a 24.8pp gap) - both sides moved more (animal
+  care/feed/fertilizer collection all require shed round-trips), but ours
+  grew faster. This is concrete, numbers-backed support for the
+  cross-cutting "unit oscillation" concern flagged in this session's
+  brief: **the same greedy per-turn nearest-task scheduler that caused
+  the animal-death coverage gaps (Task 1) is also the direct cause of
+  the elevated movement share** - it re-decides every unit's destination
+  fresh each turn with no route/multi-turn commitment, so a unit can be
+  sent back and forth between adjacent tasks turn to turn rather than
+  finishing a run. One architectural gap, not a separate movement-specific
+  bug.
+- **`noop_rate` is not elevated in real play - if anything the reverse.**
+  Our PASS rate is 0.1-1.0% in every one of these 10 games (mean 0.3%);
+  opponents range 0-50% (mean 10.9%). The "high noop_rate" concern named
+  in this session's brief does not show up here: it was very likely a
+  correct reading of a *specific* self-play condition (idle hands during
+  a cash-poor trough with no eligible task, as traced directly in the
+  Task 1 investigation, seed 11 vs v5-animal-first-meta) rather than a
+  general property of our play against real opponents. Worth tracking in
+  the arena's own `noop_rate` metric going forward (Task 4), but the
+  replay evidence says this is not currently a big lever against the real
+  ladder the way animal deaths and movement share are.
+
+**Deepest look at the strongest real opponent (91054758, $92,953, 80.4%
+of median) - the closest any replay in this project has come to a
+top-of-ladder build:**
+
+| day | money | hands | quads | crops | animals |
+|---|---|---|---|---|---|
+| 3 | 37 | 8 | NW | MELON 14 | COW 2 |
+| 9 | 191 | 10 | NW,NE | MELON 14 | COW 2 |
+| 15 | 15,030 | 10 | NW,NE | MELON 14, WHEAT 4 | COW 11, SHEEP 3, GOOSE 4 |
+| 21 | 43,120 | 10 | NW,NE,SW | MELON 14, CARROT 6, WHEAT 4 | COW 11, SHEEP 3, GOOSE 4 |
+| 27 | 80,408 | 10 | NW,NE,SW | CARROT 7, WHEAT 4 | COW 11, SHEEP 3, GOOSE 4 |
+| 29 | 92,953 | 0 | NW,NE,SW | (harvested out) | COW 11, SHEEP 3, GOOSE 4 |
+
+Three things this build does that we don't:
+
+1. **Hires much faster and earlier** - 8 hands by day 3, 10 by day 6, held
+   flat through day 27, wound down to 0 only in the final liquidation
+   window. Our own `target_hands=8` is approached far more gradually.
+2. **Runs GOOSE alongside COW/SHEEP** (4 geese, held the entire game,
+   11 cow + 3 sheep alongside). This directly contradicts the
+   `notebooks/live-meta` reading this session's animal-first rebuild was
+   built on ("geese unanimously rejected - 1 of 1,366 players ever sold
+   an egg" - see `KNOWN_UNCOVERED`'s `BUILD_COOP` justification in
+   `tests/test_invariants.py`). One real, strong counter-example doesn't
+   overturn a 1,366-player statistic on its own, but it means "never
+   worth it" is not exactly right either - flagging, not acting on yet.
+3. **Rotates into CARROT** (seed $20, matures day 3, max yield 4) for the
+   back half of the game once MELON's window is exhausted (day 21-27),
+   fully replacing melon by day 27. We have never planted a single
+   CARROT tile in any build this project has produced. WHEAT stays flat
+   at 4 tiles the entire game here too - consistent with this session's
+   own finding (Task 1, Q3) that wheat-for-feed should mostly be bought,
+   not grown at scale.
+
+None of this is a full recipe (n=1, and we can't see this opponent's
+market orders or task-assignment logic, only board state) but it's the
+first time this project has had board-state visibility into a build
+that's actually close to top-of-ladder performance, and two of its three
+distinguishing choices (faster hiring, a rotation crop late-game) are
+directly actionable without needing more data.

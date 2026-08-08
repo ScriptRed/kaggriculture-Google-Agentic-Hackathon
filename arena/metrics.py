@@ -8,6 +8,15 @@ lever the policy can pull.
 import math
 from collections import defaultdict
 
+# Real-ladder reference cash curve (notebooks/live-meta, 683 episodes /
+# 1,366 players) - see docs/strategy-log.md "Animal-first meta rebuild".
+# Day N here means "money at the end of day N" (step index N*24 - 1),
+# matching how every prior strategy-log cash-curve table was computed.
+# `final` is the day-29 end-of-episode figure. Not a fitted curve - these
+# are the dataset's own reported median checkpoints.
+CURVE_DAYS = [5, 10, 15, 20]
+REAL_MEDIAN_CURVE = {5: 299, 10: 2212, 15: 21272, 20: 45689, "final": 115664}
+
 
 def _tiles(farm):
     for y, row in enumerate(farm["tiles"]):
@@ -35,10 +44,12 @@ def episode_metrics(steps, seat):
         "hires": 0,
         "quadrants": 1,
         "peak_units": 0,
+        "curve": {},
     }
 
     prev_farm = None
     prev_shed = None
+    curve_idx = {d * 24 - 1: d for d in CURVE_DAYS}
 
     for i, step in enumerate(steps):
         obs = step[0]["observation"]
@@ -48,6 +59,9 @@ def episode_metrics(steps, seat):
         farm = farms[seat]
         priv = step[seat]["observation"].get("private", {}) or {}
         action = step[seat].get("action") or {}
+
+        if i in curve_idx:
+            m["curve"][curve_idx[i]] = farm["money"]
 
         # --- action accounting
         acts = []
@@ -124,6 +138,29 @@ HEADLINE = [
     "final_bank", "coins_per_action", "noop_rate", "idle_tile_rate",
     "plants_weeded", "animals_lost", "hires", "quadrants", "peak_units",
 ]
+
+
+def format_curve(rows):
+    """Mean bank at each CURVE_DAYS checkpoint plus final, against the real
+    ladder median (REAL_MEDIAN_CURVE) - localises a regression to a specific
+    day instead of only showing up in the final-bank headline. `rows` must
+    all be the same candidate (mix opponents freely - this is our own curve,
+    not a per-opponent one)."""
+    if not rows:
+        return "(no episodes)"
+    out = ["  day    ours       real median   ours/real"]
+    for d in CURVE_DAYS:
+        vals = [r["curve"][d] for r in rows if d in r.get("curve", {})]
+        if not vals:
+            continue
+        mean = sum(vals) / len(vals)
+        ref = REAL_MEDIAN_CURVE[d]
+        out.append(f"  {d:<6} {mean:>10.0f}   {ref:>11}   {mean/ref:>6.2f}x")
+    finals = [r["final_bank"] for r in rows]
+    fmean = sum(finals) / len(finals)
+    fref = REAL_MEDIAN_CURVE["final"]
+    out.append(f"  final  {fmean:>10.0f}   {fref:>11}   {fmean/fref:>6.2f}x")
+    return "\n".join(out)
 
 
 def format_summary(rows):
