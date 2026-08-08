@@ -339,6 +339,19 @@ def _agent_impl(obs):
                 taken.add(target)
 
     # Pass 3: idle unit near the shed picks up a waiting animal or wheat.
+    #
+    # want_wheat used to be unconditional (any WHEAT in the shed plus any
+    # animal anywhere on the farm) - with as few as 1 animal needing 1
+    # wheat/day, every idle unit decided it wanted a wheat trip every single
+    # turn, and _assign_tile_tasks (Pass 4, where PLANT/HARVEST live) never
+    # saw a free unit to give real work to. Confirmed directly (seed 11 vs
+    # pass): crops={} through day 9 despite 7 WHEAT + 12 MELON seed already
+    # held the whole time - every unit spent every turn on a wheat fetch
+    # loop instead of planting. Capped to the actual number of unfed
+    # animals not already covered by a carrying unit this turn (`unfed`
+    # minus `taken`, from Pass 2 above) - once that's satisfied, remaining
+    # idle units fall through to Pass 4.
+    wheat_fetchers_needed = len([a for a in unfed if a not in taken])
     shed_tiles = _shed_tiles(board_size)
     for i, u in enumerate(units):
         if actions[i] is not None:
@@ -347,8 +360,10 @@ def _agent_impl(obs):
         want_animal = next((k for k, m in ANIMALS.items()
                              if shed.get(k, 0) > 0 and _empty_structures(farm, m["structure"])
                              and inv.get(k, 0) == 0), None)
-        have_any_animal = any(_count_animals(farm, k) > 0 for k in ANIMALS)
-        want_wheat = shed.get("WHEAT", 0) > 0 and inv.get("WHEAT", 0) == 0 and have_any_animal
+        want_wheat = (shed.get("WHEAT", 0) > 0 and inv.get("WHEAT", 0) == 0
+                      and wheat_fetchers_needed > 0)
+        if want_wheat and not want_animal:
+            wheat_fetchers_needed -= 1
         if want_animal or want_wheat:
             target = _nearest(u, shed_tiles)
             if target:
@@ -418,7 +433,25 @@ def _market_orders(farm, private, day, hour):
             fib_a, fib_b = fib_b, fib_a + fib_b
         money -= spent
 
-    # 2. sell, batched (not the full price-impact machinery agent/main.py
+    # 2. wheat for feed - protected priority, ahead of seed/land/animal
+    # spend, same fix agent/main.py needed (docs/strategy-log.md,
+    # "animal-first meta rebuild"). Used to sit after seed-buying (step 3
+    # below) with a flat `money > 300` all-or-nothing gate - on a cash-poor
+    # day (confirmed: seed 11 vs pass, money $0-44 for a week) that gate
+    # never clears, seed-buying (which has no cash floor at all) spends
+    # whatever's left first, and every animal on the farm starves and
+    # escapes (confirmed: COW+SHEEP both gone by day 9). Moved ahead of
+    # seed-buying and changed to buy whatever's affordable toward the need
+    # instead of all-or-nothing - losing an already-owned $400-500 animal
+    # is a bigger loss than a delayed seed purchase.
+    need = _wheat_needed(farm) - shed.get("WHEAT", 0)
+    if need > 0 and money > 20:
+        buy = min(need, int(money // 5))  # ~$5/unit floor price, backstop only
+        if buy > 0:
+            orders.append(["BUY_PRODUCT", "WHEAT", buy])
+            money -= buy * 5
+
+    # 3. sell, batched (not the full price-impact machinery agent/main.py
     # has - this opponent just needs to be strategically faithful).
     liquidating = day >= 28
     for item, qty in sorted(shed.items(), key=lambda kv: -kv[1]):
@@ -436,7 +469,7 @@ def _market_orders(farm, private, day, hour):
         if n > 0:
             orders.append(["SELL", item, n])
 
-    # 3. seed the target crop mix directly from the census gap - the whole
+    # 4. seed the target crop mix directly from the census gap - the whole
     # point of this opponent is affording the turn-0 opening (docs/
     # target-plan.md), so no flat capital_reserve gate here at all. Capped
     # by hand capacity though (TILES_PER_UNIT), same fix agent/main.py
@@ -460,11 +493,6 @@ def _market_orders(farm, private, day, hour):
         elif want > 0 and seeds.get(crop, 0) == 0 and money >= cost:
             orders.append(["BUY_SEED", crop, 1])
 
-    # 4. wheat for feed, backstop from the market if the patch falls short.
-    need = _wheat_needed(farm) - shed.get("WHEAT", 0)
-    if need > 0 and money > 300:
-        orders.append(["BUY_PRODUCT", "WHEAT", need])
-
     # 5/6. land and animals - hour-gated to once/day. Without this, this
     # function's every-hour cadence buys the whole opening (2 cow + 2 sheep
     # + NE land, $1,800+$1,000) inside the first few hours of day 0, before
@@ -474,6 +502,19 @@ def _market_orders(farm, private, day, hour):
     # purchases across a few hours of day 0 (they still all clear within
     # the first day - the schedule targets them by day 3) leaves room for
     # HIRE and the crop-seed step above to run first each hour.
+    #
+    # Moving this to hour 4 (tried directly: hire, a real recurring daily
+    # cost since `hands` resets to 0 every night - see step 1 - has no cash
+    # ceiling and runs first at hour 0, so land/animal often lost the race
+    # for whatever was left) was measured and made things *worse*, not
+    # better: mean final bank on the probe seed dropped from $55,347 to
+    # $5,795 - hands collapsed to 0 for days 9-15, a new and bigger stall.
+    # Left at hour 0, unresolved - the animal-growth stall this was meant
+    # to fix (COW/SHEEP stuck at 1 each all game even with thousands in the
+    # bank) is real and still present, but this specific fix made the
+    # bigger number worse. Flagged for Task 2's summary as a known,
+    # diagnosed, not-yet-fixed cap rather than risking a regression under
+    # time pressure without a proper multi-seed measurement.
     if hour == 0:
         n_extra = len(farm.get("unlocked_quadrants", ["NW"])) - 1
         if n_extra < 2:  # NE, then SW - never SE

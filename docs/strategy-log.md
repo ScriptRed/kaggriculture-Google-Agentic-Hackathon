@@ -1980,3 +1980,79 @@ the real ladder median, not just final bank), `docs/ladder-observations.md`
 (Task 3: ten fresh replay analysis, appended below).
 
 Verdict: ADOPTED.
+
+### 2026-08-08  Task 2: route-proxy rebuild - two real bugs fixed, tripled, still short of $80k
+
+Brief: rebuild `route-proxy` (finishing $18,086, "proxies nothing") against
+the live-meta consensus; target ~$100k; if it can't get there, diagnose
+what caps it; **do not add to `DEFAULT_OPPONENTS` until it clears $80k**.
+Traced directly (seed 11 vs `pass`) before changing anything, matching
+Task 1's methodology.
+
+**Bug 1 - Pass 3's `want_wheat` was unconditional.** `_agent_impl`'s idle-
+unit shed-pickup pass sent *every* idle unit to fetch wheat whenever any
+WHEAT sat in the shed and any animal existed anywhere on the farm - no
+check on whether feeding was actually needed, no cap on how many units
+chased it. With as few as 1 animal (1 wheat/day), every single unit spent
+every single turn on a wheat-fetch loop, and `_assign_tile_tasks` (Pass 4,
+where PLANT/HARVEST live) never got a free unit to hand real work to.
+Confirmed directly: `crops={}` through day 9 despite 7 WHEAT + 12 MELON
+seed held the entire time - seeds bought, never planted. Fixed: capped to
+the actual number of unfed animals not already covered by a carrying unit
+this turn (`unfed` minus `taken`, both already computed in Pass 2), so
+once real feed demand is satisfied, remaining idle units fall through to
+Pass 4.
+
+**Bug 2 - wheat-for-feed purchase sat after seed-buying with a flat
+`money > 300` all-or-nothing gate** - the exact bug class agent/main.py's
+"animal-first meta rebuild" already found and fixed, never ported here.
+Fixing bug 1 alone (final bank 23,700 -> 9,659, *worse*) exposed it: units
+now correctly tried to feed animals, but on a cash-poor day seed-buying
+(no cash floor at all) spent whatever was available first, the `> 300`
+feed gate never cleared, and every animal starved (COW+SHEEP both dead by
+day 9). Fixed the same way as `agent/main.py`: moved wheat-feed ahead of
+seed-buying (protected priority) and changed it to buy whatever's
+affordable toward the need instead of all-or-nothing.
+
+**Both together: $23,700 -> $55,347 (seed 11 vs `pass`), consistent across
+5 seeds ($54,242-$58,285, mean ~$55,982).** Against our own (much
+stronger) real agent specifically - the way this opponent actually gets
+used - mean bank $44,314 (48 episodes, `--compare`-style), still a ~2.4x
+improvement over the original $18,086.
+
+**Diagnosed, not fixed: animal count stuck at 1 COW + 1 SHEEP the entire
+game even with thousands of dollars in the bank** (target is 8/6).
+Root cause, confirmed directly: `hands` genuinely resets to 0 every
+single night (not just "the new hire from today hasn't landed yet" - the
+*entire* roster, verified hour-by-hour across a day boundary), so
+re-hiring the full `target_hands` every day is a real, recurring cost
+(~$143/day for 10 hands) that runs first, at hour 0, with no cash ceiling
+of its own. `BUY_LAND`/`BUY_ANIMAL` are also hour-0-gated (once/day) and
+lose the race for whatever hire left behind - confirmed directly (day 12,
+hour 0: $248 available, hire alone spends $143, the $105 left is short of
+a $400 cow, and since this block only fires once at hour 0 it gets no
+second chance that day even after `SELL` orders land more cash by hour
+2). **Tried moving the land/animal block to hour 4** (let hire and sell
+run first, cash settle) - measured directly and it made things *worse*,
+not better: mean final bank on the probe seed dropped from $55,347 to
+$5,795, with hands collapsing to 0 for days 9-15, a new and bigger stall
+than the one it was meant to fix. Reverted. Not chased further this
+session - a proper fix here needs its own isolated measurement (one
+hypothesis per branch) rather than a second speculative change stacked
+under time pressure on top of an already-large diff.
+
+**Verdict on the brief's own bar: still short.** $44-58k depending on
+opponent, well under the $80k floor for `DEFAULT_OPPONENTS` inclusion (it
+was already in the pool from before this session and stays, unchanged -
+not newly added). Both fixes are genuine, validated, real bugs (not
+reverted), and the diagnosis for what's capping it further is concrete
+and actionable for a future session: the animal-growth stall from
+hire/land/animal cash competition, isolated to its own branch.
+
+Change: `arena/opponents/route-proxy/main.py` only (`_agent_impl` Pass 3
+wheat-fetch cap, `_market_orders` step ordering/gate for wheat-feed).
+Deliberately self-contained per this file's existing convention - no
+`agent/` or shared-module changes.
+
+Verdict: PARTIAL - two real bugs fixed and measured, target not reached,
+cause of the remainder named per the brief's own fallback instruction.
