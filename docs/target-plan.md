@@ -1,5 +1,69 @@
 # Target production plan
 
+## 2026-08-08 update: superseded by real ladder data (notebooks/live-meta)
+
+Everything below this note was built from a **single recorded route**
+(barnyard-economist, itself unexecuted - see the evidence-quality table).
+`notebooks/live-meta` turned out to contain more than the byte-identical
+duplicate of `frontier-lab-high-score` flagged below - its "8.5 Daily Meta
+Report" section (cell 28) is a **683-episode/1,366-player** real-ladder
+snapshot, not a single route. Read the notebook in full (not just sampled,
+as this doc originally did) and every specific claim checked against it
+matched verbatim. What we could independently verify:
+
+- **The engine-version calibration is real and confirmed.** The notebook's
+  own four premium price cliffs (strawberry 62, wool 59, milk 76, melon
+  158 units to the $1 floor) match our installed `kaggle-environments`
+  1.32.5 exactly - now a permanent regression test
+  (`tests/test_constants.py::test_premium_price_cliffs_match_notebook_reference`).
+- **The "pure-animal farms" reading of its own data is wrong, and we can
+  prove it from our own replays, not just the notebook's numbers**
+  (Task 5a): `crops={}` in the notebook's own final-board tally is the
+  state at turn 720, after early one-time crops (wheat, melon) have long
+  since been harvested and ongoing crops (strawberry) have decayed past
+  their 4-production cap - it does not mean crops were never grown. Direct
+  proof from `replays/*.json`: "Ak", our single highest-scoring real
+  opponent ($62,271, first flagged in this doc's original gap analysis
+  below), bought 9 wheat + 7 melon seed in days 0-4 and still finished
+  with `final_crops={}`. "dejavucry" (episode 90750259, $13,588) shows the
+  identical pattern (6 wheat + 8 melon early, empty final board). Two for
+  two among the real replay opponents that show any early crop activity at
+  all.
+- **The "5 hands, fib makes the 7th unaffordable" reading is also wrong**
+  (Task 5b): 7 hires cost `fib(0)+...+fib(6) = 33` coins total, against a
+  **$21,272 median day-15 bank** in the same dataset - not remotely a
+  binding constraint. The notebook's own trend table shows the modal hand
+  count going 12 -> 12 -> 5 across three consecutive days, which it
+  flags itself as "a real meta shift or a data anomaly - verify with the
+  next snapshot." `PARAMS["target_hands"]` was **not** retuned down on the
+  strength of this reading.
+
+**Corrected target, implemented on `strat/animal-first-meta`:** COW:8 +
+SHEEP:6 (no geese - 1 of 1,366 players ever sold an egg), bought from day
+0; wheat (~14) and melon (~12) as a bounded one-time early batch, not an
+ongoing crop program (no carrot/tomato - 37 and 1 of 1,366 players
+respectively, noise not meta); fertilizer sold aggressively from day ~2
+as a first-mover revenue line (finite, non-regenerating, opponent-shared
+pool - zero shop or town-centre demand, `docs/economics.md`); land NE
+then SW, never the $4,000 SE quadrant; sales metered to
+`sustainable_rate()`-derived town absorption instead of a flat batch cap.
+No strawberry this round - the dominant modal composition (86% of the
+notebook's own top-5 cluster) is pure animal with zero surviving crops;
+strawberry only appears in the minority (~2.5%) compositions.
+
+**Measured**: paired against `route-proxy` (the barnyard-economist-derived
+yardstick this doc's original analysis was used to build), mean **+33,938**
+coins/game (95% CI [+32,276, +35,601], t-test and Wilcoxon agree, **100%**
+win rate, n=96). Full results, the feed-chain engineering this required,
+and the residual `animals_lost` gap are in `docs/strategy-log.md`. The
+original barnyard-economist-derived analysis below is kept for its
+still-relevant methodology notes (evidence-quality grading, the PASS-slot
+finding, the closed-loop cross-check) but its specific target numbers
+(12 melon / 7 wheat / strawberry-ramp / land-timing-as-open-question) are
+superseded by the above.
+
+---
+
 Extracted from `barnyard-economist`, cross-checked against `kaito-v18-closed-loop`,
 `kaito-v21-conditional-memory`, `kaito-v22-price-impact`, `live-meta`, and our
 own 7 real ladder replays in `replays/`. Read `docs/economics.md` first - the

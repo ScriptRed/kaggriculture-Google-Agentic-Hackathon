@@ -27,19 +27,27 @@ for _p in (_HERE, "/kaggle_simulations/agent", os.getcwd()):
 from constants import (  # noqa: E402
     CROPS, ANIMALS, MOVES, LAND_PRICES, MARKET_PARAMS,
     market_price, marginal_price_after, bonus_window, harvest_age,
-    hire_cost,
+    hire_cost, sustainable_rate,
 )
 
 PASS = ["PASS"]
 
 # --- tunables. these are the knobs the arena optimises. -------------------
 PARAMS = {
+    # target_hands is intentionally NOT retuned here. notebooks/live-meta's
+    # own "5 hands because fib makes the 7th unaffordable" reading of its
+    # data is wrong (7 hires cost $33 total against a $21,272 median day-15
+    # bank - trivially affordable; its own trend table shows 12->12->5 in
+    # three days, which it flags as possibly anomalous, and its hand count
+    # is measured at the wound-down final step, day 29) - see docs/
+    # strategy-log.md. Left at 8 on purpose.
     "target_hands": 8,          # hands to hire each morning
     "hand_budget_frac": 0.05,   # ...but never spend more than this of bank
-    "sell_floor_frac": 0.65,    # don't sell below this fraction of base price
-    "sell_batch_premium": 3,    # max units/turn for premium goods
-    "sell_batch_staple": 12,    # max units/turn for wheat/egg
-    "seed_buffer": 6,           # keep this many seeds of the active crop
+    "sell_floor_frac": 0.65,    # price floor for one-time-harvest sells
+                                 # (WHEAT/MELON) and a safety net under the
+                                 # absorption-metered ongoing sells (MILK/
+                                 # WOOL) - see _sell_plan.
+    "seed_buffer": 6,           # keep this many seeds of the active early crop
     "capital_reserve": 1200,    # cash floor for land/animal/seed spend
     "tiles_per_unit": 4,        # cap on simultaneous plants+held-seed per
                                  # farmer/hand - see _market_orders step 3.
@@ -51,96 +59,57 @@ PARAMS = {
                                  # can't keep up with the resulting plants -
                                  # tried it, cost -231/-260 coins paired vs
                                  # v1 (see docs/strategy-log.md).
-    "land_buy_min_day": 10,     # tried lowering to 3 alongside the phase-
-                                 # aware reserve below - measurably worse
-                                 # even under these old (pre-target-plan)
-                                 # crop/animal targets: test_agent_beats_pass
-                                 # flipped to a loss (1536 vs pass's 3000 at
-                                 # day 10) because $1000 of NE land bought
-                                 # that early has no revenue engine behind it
-                                 # yet to work it. Reverted - land timing is
-                                 # explicitly an open question in
-                                 # docs/target-plan.md (our own real-replay
-                                 # evidence disagrees with barnyard-
-                                 # economist's "always buy land" claim), not
-                                 # something to move on a hunch. Leave it for
-                                 # the production-plan work, which will
-                                 # decide land timing against the real target
-                                 # composition instead of in isolation.
-    "crop_early": "WHEAT",
-    "crop_main": "CARROT",
-    # Animal targets and buy-day gates, unified. Was goose_target=4,
-    # goose_buy_min_day=12, no cow/sheep at all - tuned back when
-    # BUY_ANIMAL bought nothing that ever produced (see the animal-pipeline
-    # entry in strategy-log). First attempt at retuning this went to
-    # goose_buy_min_day=3, target=6 - reasoning that geese are cheap ($300),
-    # fast (first_yield_day 4), and glut-resistant, so there's no reason to
-    # wait. That reintroduced the *original* early-capital-discipline bug
-    # this whole project started with: 6 geese is $1,800, and capital_
-    # reserve alone doesn't stop that from landing inside the same handful
-    # of days a still-bootstrapping crop economy needs, for the same
-    # reason it didn't stop land+seed spend colliding back then - lost to
-    # `pass` at day 10 again (1,960 vs 3,000). Reset to the same window
-    # land already uses (day 10) rather than re-litigating it from
-    # scratch; cow/sheep sit a couple of days later still (slower payback,
-    # first_yield_day 8/6, and higher per-unit upkeep).
-    # Cut from {6, 3, 2} after PICKUP/PLACE actually started working:
-    # feeding is a *daily* obligation for every animal regardless of
-    # product interval, and the greedy per-turn scheduler has no notion of
-    # "finish the job I started" - a wheat-carrying unit can get diverted
-    # mid-round by a closer HARVEST or WATER-rescue task and never reach
-    # the last one or two animals that day. Traced directly (seed 11,
-    # small-herd probe): one carrier fed 2 of 3 geese and never reached the
-    # third before day-end, which was enough for a next-day escape. At
-    # {6, 3, 2} = 11 animals this cost 12-20 escapes/game (~$4-8k of
-    # capital, at $300-500/animal); {4, 2, 1} = 7 cut it to single digits.
-    # Not zero - a real, measured cost of this scheduler shape, not a bug
-    # left in - see the Branch 2 strategy-log entry for the full numbers.
-    "animal_target": {"GOOSE": 4, "COW": 2, "SHEEP": 1},
-    # GOOSE lowered 10 -> 3 alongside land_buy_min_day, same reasoning:
-    # unjustified now that the phase-aware reserve does the early-spend
-    # sequencing. COW/SHEEP's day-12 gate is left alone here - the target
-    # route wants them turn-0, but that's a composition change (which
-    # animals, how many, by when), not a gate-plumbing one; it belongs to
-    # the production-plan work that replaces this whole dict, not this
-    # enabling change.
-    "animal_buy_min_day": {"GOOSE": 3, "COW": 12, "SHEEP": 12},
-    "fert_reserve": 4,          # fertilizer kept for crops before selling
+    "land_buy_min_day": 5,      # notebooks/live-meta: real median first-land
+                                 # ORDER day is 7, but that's the outcome of
+                                 # cash naturally reaching ~$1,000 by then,
+                                 # not a rule to hard-code - gate opens at 5
+                                 # so revenue (fertilizer from ~day 2, the
+                                 # wheat/melon harvest) has a few days'
+                                 # head start before land competes for the
+                                 # same cash, then let affordability (see
+                                 # _reserve()) decide the actual day.
+    "land_quadrants_target": 2,  # NE then SW, never the $4,000 SE one -
+                                 # notebooks/live-meta: 0% of top compositions
+                                 # own it.
+    # Early crop target (notebooks/live-meta §6/8.5, 683 episodes/1,366
+    # players): "early seeds avg wheat 14.0, melon 11.6 per player over
+    # days 0-4" - a bounded, one-time opening batch, not an ongoing crop
+    # program (see _pick_crop - gap-based, no hard day cutoff). No carrot
+    # (37/1366 players) or tomato (1/1366) - noise, not meta. No
+    # strawberry this branch - the *dominant* modal composition (86% of
+    # the top-5 cluster) is pure animal with zero surviving crops;
+    # strawberry only appears in minority (~2.5%) compositions and isn't
+    # asked for here - see docs/strategy-log.md for the full reasoning.
+    "early_crop_target": {"WHEAT": 14, "MELON": 12},  # 11.6 rounds to 12
+    # Herd: every one of the top-5 compositions (1,366 players) is exactly
+    # COW:8, SHEEP:6, first bought day 0 - no exceptions, and only 1 of
+    # 1,366 players ever sold an egg. Geese dropped entirely.
+    "animal_target": {"COW": 8, "SHEEP": 6},
+    "animal_buy_min_day": {"COW": 0, "SHEEP": 0},
+    # Fertilizer is a primary revenue line, not a crop-support reserve (we
+    # don't fertilize crops here - FERTILIZE stays unexercised, tracked in
+    # tests/test_invariants.py::KNOWN_UNCOVERED). It has zero shop demand
+    # and is excluded from town-centre consumption (docs/economics.md) -
+    # the ~493-unit pool to the $1 floor never regenerates and is shared
+    # with the opponent, so every unit held back is a unit the opponent
+    # can sell into the good early prices instead. Sell all of it, always.
+    "fert_reserve": 0,
     # Unsold shed inventory doesn't count toward the final score (reward is
     # money only - kaggriculture.json). From this day on, drop the price
-    # floor, the fertilizer/wheat reserves, and the per-turn batch caps and
+    # floor, the fertilizer/wheat reserves, and the metering caps and
     # sell down to zero every turn: a $1-floor sale still beats a stranded
     # unit worth exactly $0 at the final whistle. Two days of lead time -
     # plenty, since a terminal SELL has no per-order quantity cap and the
     # whole shed (<=100 items) clears in one turn once the caps are off.
     "liquidation_day": 28,
-    # Construction-phase capital gate (target-plan Task 1). The target route
-    # (docs/target-plan.md) spends nearly the whole $3,000 opening bank on
-    # turn 0 - two cows, two sheep, a season's worth of melon/wheat seed -
-    # and sits at $187 by day 3, well under our flat capital_reserve=1200.
-    # Only applied to BUY_LAND/BUY_ANIMAL (see _reserve() and its two call
-    # sites below) - NOT to the seed-buffer purchase in step 3, which keeps
-    # PARAMS["capital_reserve"] unconditionally. Measured why the split
-    # matters: applying this to the seed step too (tried first) reintroduced
-    # plants_weeded (0 -> up to 34/game, seeds 11/23/37) even though
-    # tiles_per_unit is supposed to cap overplanting independent of cash -
-    # it turns out capital_reserve was *also* pacing how fast the seed
-    # buffer could refill relative to actual watering throughput, which
-    # tiles_per_unit alone doesn't constrain once hand count is nontrivial
-    # (n_units * tiles_per_unit = 9*4 = 36 possible simultaneous tiles at
-    # target_hands=8). The seed step isn't what's blocking the target
-    # route's turn-0 opening anyway - Task 2 replaces its whole selection
-    # mechanism (_pick_crop/seed_buffer) with target-driven PLANT scoring,
-    # so this split doesn't need to survive past that landing, only until
-    # then. BUY_LAND/BUY_ANIMAL are one-shot decisions, not a recurring
-    # drain, so they don't have the same pacing role.
-    #
-    # capital_reserve=1200 itself exists for a real, separate reason (the
-    # "capital_reserve stall trap" strategy-log entry: hiring must never be
-    # able to out-compete the crop engine's one bootstrap purchase for cash)
-    # - unaffected here since hiring's own seed_floor budget check and the
-    # seed step's flat reserve are both untouched. Restored to the full
-    # deadlock-guard value for land/animal too once construction ends.
+    # Construction-phase capital gate (target-plan Task 1, prior session).
+    # Applied to BUY_LAND/BUY_ANIMAL only (see _reserve()) - NOT to the
+    # seed-buffer purchase in step 3, which keeps PARAMS["capital_reserve"]
+    # unconditionally. capital_reserve turned out to also be pacing how
+    # fast the seed buffer could refill relative to actual watering
+    # throughput, which tiles_per_unit alone doesn't constrain once hand
+    # count is nontrivial - see docs/strategy-log.md, "phase-aware capital
+    # gate", for the measured regression this split fixes.
     "construction_end_day": 22,
     "capital_reserve_construction": 0,
 }
@@ -153,7 +122,47 @@ def _reserve(day):
     return PARAMS["capital_reserve"]
 
 
-PREMIUM = {"MELON", "STRAWBERRY", "MILK", "WOOL"}
+# Task 3 (target-plan rebuild, notebooks/live-meta): sell metering splits
+# by market shape, not a flat premium/staple batch cap.
+#
+# ONGOING_SELL: animals produce these every few days for the rest of the
+# game - a real, regenerating demand exists (sustainable_rate(), Task 1's
+# sustainable-revenue work), so meter to it: sell up to a share of daily
+# town absorption, spread across the day, rather than dumping a flat batch.
+#
+# One-time-harvest items (WHEAT, MELON here - see early_crop_target) get no
+# metering cap at all: they're a fixed quantity from a bounded early
+# planting window, not a flow to protect over the rest of the season -
+# `sustainable_rate` doesn't even apply (there's no "next batch" whose
+# price this game's selling needs to preserve). Sold at whatever quantity
+# the existing price-floor check allows.
+#
+# FERTILIZER is neither: `sustainable_rate("FERTILIZER", day)` is
+# structurally 0 (no shop entry, excluded from TOWN_CENTER_PRODUCTS -
+# docs/economics.md) because nothing regenerates its market - it's a
+# ~493-unit pool to the floor, shared with the opponent, only ever drained.
+# Metering it to a demand rate of zero would mean never selling it, which
+# is backwards: the right move is first-mover, not conservation - see
+# fert_reserve=0 and the dedicated branch below.
+ONGOING_SELL = {"MILK", "WOOL"}
+
+
+def _sell_plan(item, qty, day, cur_inv, unlocked_shops):
+    """Units of `item` to sell this call, and how (Task 3 metering)."""
+    if item in ONGOING_SELL:
+        daily = sustainable_rate(item, day, unlocked_shops=unlocked_shops)
+        # Spread over the day rather than one lump: shops tick every 4
+        # turns (6x/day - constants.SHOP_SELL_TICKS_PER_DAY), so roughly
+        # matching that cadence keeps each order's slice of the day's
+        # absorption from arriving all at once and crashing itself.
+        n = min(qty, max(1, round(daily / 6)))
+    else:
+        n = qty  # one-time harvest (WHEAT/MELON): no daily rate to protect
+    base = MARKET_PARAMS[item]["base"]
+    floor = base * PARAMS["sell_floor_frac"]
+    while n > 0 and marginal_price_after(item, cur_inv, n) < floor:
+        n -= 1
+    return n
 
 
 # --- small helpers ---------------------------------------------------------
@@ -370,19 +379,26 @@ def _build_tasks(obs, farm, private, day, board_size, inventories):
             if t.get("yield_units", 0) > 0:
                 tasks.append((88, (x, y), ["HARVEST"]))
             if t.get("fertilizer_available"):
-                tasks.append((75, (x, y), ["COLLECT_FERTILIZER"]))
+                # Raised 75 -> 86 (Task 2, target-plan rebuild): fertilizer
+                # is a primary revenue line here, not a minor side-product -
+                # a finite, non-regenerating, opponent-shared pool where
+                # collecting (and selling - see fert_reserve=0) first is a
+                # real edge (docs/economics.md, docs/strategy-log.md). Above
+                # PLACE (80) and routine FEED (82), below animal-product
+                # HARVEST (88) and rescue-tier (100 - emergency FEED never
+                # loses to this).
+                tasks.append((86, (x, y), ["COLLECT_FERTILIZER"]))
             if not t.get("fed_today"):
-                # Non-urgent baseline raised from 65 to 82: FEED is only
-                # ever eligible for a unit already carrying WHEAT (a small,
-                # deliberately-limited pool - see the wheat-pickup runner
-                # cap above), so unlike most tasks it can't out-compete
-                # other work for a *free* unit. At 65 it lost every tie to
-                # routine HARVEST (85-105) whenever a carrier passed near
-                # one, so wheat sat carried-but-undelivered and animals
-                # missed a day even with plenty of wheat in hand. 82 beats
-                # PLACE (80) and most ordinary harvests while staying below
-                # rescue-tier (100), so it's not treated as more urgent
-                # than it is until it actually is.
+                # Non-urgent baseline 82: FEED is only ever eligible for a
+                # unit already carrying WHEAT (a small, deliberately-
+                # limited pool - see the wheat-pickup runner cap above),
+                # so unlike most tasks it can't out-compete other work for
+                # a *free* unit. Raising this to 87 (above
+                # COLLECT_FERTILIZER) was tried and measured *worse*
+                # (mean animals_lost 3.1 -> 4.4 across 8 seeds) - not the
+                # actual bottleneck; reverted. 82 beats PLACE (80) and
+                # most ordinary harvests while staying below rescue-tier
+                # (100).
                 urgency = 100 if t.get("consecutive_unfed", 0) >= 1 else 82
                 tasks.append((urgency, (x, y), ["FEED"]))
             elif not t.get("cared_today"):
@@ -424,42 +440,72 @@ def _build_tasks(obs, farm, private, day, board_size, inventories):
     # Wheat pickup for FEED: scaled to actual need, not a flat qty=2. A
     # flat amount only ever covers one animal - with double-digit herds by
     # midgame this left roughly half the animals unfed every single day
-    # even with plenty of WHEAT sitting unused in the shed (confirmed: 8
-    # shed WHEAT next to 8 simultaneously-unfed animals, all day), which is
-    # what drove animals_lost into the teens per game. Fetch enough for
-    # every animal currently owed a feed today, net of wheat units are
-    # already carrying, via 2 runners (no carry cap in this game, so one
-    # trip can restock several days of feeding at once). Tried offering
-    # this at all 4 shed tiles to parallelise feeding a scattered herd -
-    # regressed plants_weeded from 0 to 1-5/game (see strategy-log): at
-    # urgency 100 it ties WATER-rescue for the same units, and 4 slots
-    # pulled too many of them off rescue-water. 2 keeps that invariant
-    # intact; the remaining feed shortfall is addressed by not buying more
-    # herd than 2 runners can realistically service (see animal_target).
+    # even with plenty of WHEAT sitting unused in the shed, which is what
+    # drove animals_lost into the teens per game. Fetch enough for every
+    # animal currently owed a feed today, net of wheat units already being
+    # carried, via all 4 shed tiles whenever any feed is owed - not scaled
+    # down for a small need, because FEED requires the assigned unit to
+    # already be *carrying* wheat (a same-turn PICKUP doesn't chain into a
+    # same-turn FEED - the scheduler re-decides every unit's task fresh
+    # each turn, no "finish the delivery" memory), so more simultaneous
+    # carriers means more chances one of them is near whichever cluster of
+    # the herd is currently unfed. Confirmed this matters at scale: with
+    # only 2 runners, 6 sheep split across two tiles a few squares apart
+    # had 4 of them starve while the other 2 got fed every day (the
+    # runners kept reaching the same nearer cluster) - animals_lost traced
+    # directly to this before widening to 4. No carry-quantity cap in this
+    # game, so each runner can still restock several feeds worth per trip.
     feed_needed = sum(1 for s, _, a in tasks if a and a[0] == "FEED")
     wheat_carried = sum((inv or {}).get("WHEAT", 0) for inv in inventories)
     wheat_needed = feed_needed - wheat_carried
     if wheat_needed > 0 and shed.get("WHEAT", 0) > 0:
         any_unfed_urgent = any(s == 100 and a and a[0] == "FEED" for s, _, a in tasks)
         score = 100 if any_unfed_urgent else 65
+        shed_tiles = _shed_tiles(board_size)
         qty = min(wheat_needed, shed["WHEAT"])
-        for st in _shed_tiles(board_size)[:2]:
-            tasks.append((score, st, ["PICKUP", "WHEAT", qty]))
+        qty_per_runner = max(1, -(-qty // len(shed_tiles)))  # ceil(qty/4)
+        for st in shed_tiles:
+            tasks.append((score, st, ["PICKUP", "WHEAT", qty_per_runner]))
 
     return tasks
 
 
+def _count_crop(farm, crop):
+    return sum(1 for _, _, t in _iter_tiles(farm)
+               if isinstance(t, dict) and t.get("kind") == "PLANT" and t.get("crop") == crop)
+
+
 def _pick_crop(farm, seeds, day):
-    """Which crop to sow. Early game: wheat (cheap, fast, feeds animals)."""
-    days_left = 30 - day
-    if days_left < 4:
-        return None  # won't mature; don't waste seed money
-    if days_left < 6:
-        return PARAMS["crop_early"]
-    for crop in (PARAMS["crop_main"], PARAMS["crop_early"]):
-        if seeds.get(crop, 0) > 0:
-            return crop
-    return PARAMS["crop_main"]
+    """Which crop to sow on one empty tile right now, or None.
+
+    A bounded, one-time opening batch (docs/strategy-log.md,
+    notebooks/live-meta: "early seeds avg wheat 14.0, melon 11.6 per
+    player, days 0-4") - not an ongoing crop program. Gap-based, not a
+    hard day cutoff: at the real $3,000 start the buffer purchase in
+    _market_orders step 3 comfortably closes both gaps within days 0-4
+    on its own, matching the notebook's own numbers, so a cutoff would be
+    redundant there. A hard `day > early_crop_end_day` cutoff was tried
+    first and cost the low-startingMoney stress test hard: at low cash
+    only the one-seed-at-a-time trickle fallback can fire (the full-
+    buffer purchase needs capital_reserve=$1,200 headroom it may never
+    reach), so by day 4 only a few tiles were planted, the cutoff then
+    permanently blocked any more, and with animals (COW $400/SHEEP $500)
+    also unaffordable there was nothing left to do - a new deadlock,
+    same shape as the original capital_reserve stall trap. Gap-based
+    keeps trying (at whatever pace cash allows) until the target is
+    actually met, so a slow start still finishes eventually instead of
+    stalling forever. Picks whichever of WHEAT/MELON has the bigger
+    remaining gap to its target."""
+    best, best_gap = None, 0
+    for crop, target in PARAMS["early_crop_target"].items():
+        cd = CROPS[crop]
+        if 30 - day < cd["max_yield_day"] + 1:
+            continue  # won't mature in time; don't waste seed money
+        have = _count_crop(farm, crop) + seeds.get(crop, 0)
+        gap = target - have
+        if gap > best_gap:
+            best, best_gap = crop, gap
+    return best
 
 
 # --- assignment ------------------------------------------------------------
@@ -600,9 +646,24 @@ def _market_orders(obs, farm, private, day, hour, inventories=None):
     # bootstrap itself: floor the budget at twice the active crop's seed
     # cost (not a flat $50), so a run of cheap hires can't leave us unable
     # to afford the one purchase that generates future income.
+    #
+    # Except: a couple of hires cost almost nothing (fib(0)+fib(1) = $2)
+    # and are never worth fully blocking, regardless of the reserve above.
+    # Confirmed a real, severe cost of not guaranteeing this: at 14
+    # animals, a near-zero-cash day (money < seed_floor, common during the
+    # target route's own trough - docs/strategy-log.md) zeroed the hire
+    # budget entirely, leaving only the farmer to cover the whole board -
+    # 5+ animals sat unfed *all day* despite wheat sitting in the shed,
+    # not because feed wasn't there but because there was no one left to
+    # deliver it. animals_lost 19-22/game traced directly to this. A tiny
+    # floor here is negligible next to any real purchase but is the
+    # difference between 1 unit and 3 on the worst days.
     if hour == 0:
         seed_floor = (CROPS[crop]["seed"] * 2) if crop else 20
-        budget = min(money * PARAMS["hand_budget_frac"], max(0, money - seed_floor))
+        budget = max(
+            min(money * PARAMS["hand_budget_frac"], max(0, money - seed_floor)),
+            min(money, 4),
+        )
         spent = 0
         n = hires_today
         while n < PARAMS["target_hands"]:
@@ -614,36 +675,51 @@ def _market_orders(obs, farm, private, day, hour, inventories=None):
             n += 1
         money -= spent
 
-    # 2. sell, price-impact aware. Reserves, the price floor, and the
-    # per-turn batch cap all exist to protect *future* sales - once there's
-    # no future left (liquidation_day), unsold shed inventory doesn't count
-    # toward the final score at all, so every one of those becomes a way to
-    # strand value instead of protect it. Drop them and dump the shed.
+    # 2. sell. Reserves, the price floor, and the metering cap all exist to
+    # protect *future* sales - once there's no future left (liquidation_day),
+    # unsold shed inventory doesn't count toward the final score at all, so
+    # every one of those becomes a way to strand value instead of protect
+    # it. Drop them and dump the shed.
     liquidating = day >= PARAMS["liquidation_day"]
+    unlocked_shops = (obs.get("town", {}) or {}).get("unlocked_shops", [])
     for item, qty in sorted(shed.items(), key=lambda kv: -kv[1]):
         if qty <= 0 or item not in MARKET_PARAMS:
             continue
-        if not liquidating:
-            if item == "FERTILIZER" and qty <= PARAMS["fert_reserve"]:
+        if not liquidating and item == "WHEAT":
+            qty = max(0, qty - _wheat_needed(farm))
+            if qty <= 0:
                 continue
-            if item == "WHEAT":
-                qty = max(0, qty - _wheat_needed(farm))
-                if qty <= 0:
-                    continue
         if liquidating:
             n = qty
+        elif item == "FERTILIZER":
+            n = qty  # first-mover, finite shared pool - see fert_reserve=0
         else:
-            cap = PARAMS["sell_batch_premium"] if item in PREMIUM else PARAMS["sell_batch_staple"]
-            n = min(qty, cap)
-            base = MARKET_PARAMS[item]["base"]
-            floor = base * PARAMS["sell_floor_frac"]
             cur_inv = inv.get(item, 10000)
-            while n > 0 and marginal_price_after(item, cur_inv, n) < floor:
-                n -= 1
+            n = _sell_plan(item, qty, day, cur_inv, unlocked_shops)
         if n > 0:
             orders.append(["SELL", item, n])
 
-    # 3. keep seeds stocked. Two things, kept deliberately separate:
+    # 3. buy wheat to feed the herd - protected priority, ahead of new
+    # seed/land/animal spend (Task 1, target-plan rebuild). Losing an
+    # already-owned animal ($400-500) to a missed feed is a real capital
+    # loss, not just a missed opportunity, and 14 animals x 1 wheat/day
+    # (~390 over the season, notebooks/live-meta) needs real, ongoing cash
+    # that the early wheat batch alone can't fully cover. Buys whatever
+    # is affordable toward the need, not all-or-nothing: partially fed is
+    # still much better than the old flat "$400 minimum, or nothing" gate,
+    # which blocked every feed purchase for most of the cash-poor early
+    # game and reproduced the "capital_reserve stall trap" shape at animal
+    # scale - confirmed directly (seed 11: animals_lost 22, cow/sheep
+    # counts oscillating 4->0, 5->1 day to day - see docs/strategy-log.md).
+    need = _wheat_needed(farm) - shed.get("WHEAT", 0)
+    if need > 0 and money > 20:
+        price = market_price("WHEAT", inv.get("WHEAT", 10000))
+        buy = min(need, int(money // max(1, price)))
+        if buy > 0:
+            orders.append(["BUY_PRODUCT", "WHEAT", buy])
+            money -= price * buy
+
+    # 4. keep seeds stocked. Two things, kept deliberately separate:
     #
     # (a) a cap on *simultaneous* plants+held-seed relative to hand count,
     #     independent of cash. Fixes overplanting - see the tiles_per_unit
@@ -674,19 +750,12 @@ def _market_orders(obs, farm, private, day, hour, inventories=None):
             elif seeds.get(crop, 0) == 0 and money >= cost:
                 orders.append(["BUY_SEED", crop, 1])
 
-    # 4. buy wheat to feed animals if we're short
-    need = _wheat_needed(farm) - shed.get("WHEAT", 0)
-    if need > 0 and money > 400:
-        price = market_price("WHEAT", inv.get("WHEAT", 10000))
-        if money > price * need + 300:
-            orders.append(["BUY_PRODUCT", "WHEAT", need])
-
     # 5. land, then animals. One BUY_ANIMAL per call (the biggest deficit,
     # from _animal_deficit) rather than the whole target at once - this
     # function runs every hour, so purchases naturally pace themselves the
     # same way the seed-buying above does, instead of a single-turn burst.
     n_extra = len(farm.get("unlocked_quadrants", ["NW"])) - 1
-    if n_extra < len(LAND_PRICES):
+    if n_extra < PARAMS["land_quadrants_target"]:  # NE then SW, never SE
         price = LAND_PRICES[n_extra]
         if (money > price + _reserve(day)
                 and PARAMS["land_buy_min_day"] <= day < PARAMS["construction_end_day"]):

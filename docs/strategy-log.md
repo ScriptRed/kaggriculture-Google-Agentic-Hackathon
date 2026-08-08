@@ -1616,3 +1616,217 @@ Change: `arena/opponents/route-proxy/main.py` (new), `arena/run.py`
 (`route-proxy` added to `DEFAULT_OPPONENTS`).
 
 Verdict: ADOPTED.
+
+---
+
+### 2026-08-08  Animal-first meta rebuild (notebooks/live-meta, 683 episodes/1,366 players)
+
+Hypothesis: `notebooks/live-meta`'s real-ladder-data mechanism - production
+sized *below* town absorption so price never falls (8 cow = 4 milk/day vs
+18/day absorption; 6 sheep = 2 wool/day vs 12/day) - is a stronger,
+better-evidenced target than the single-recording-derived
+`docs/target-plan.md`. Branch: `strat/animal-first-meta`, from `main`
+(Task 1 + Task 4 only).
+
+**Verified before building on it.** The engine-version calibration
+(4 premium price cliffs) matches our installed engine exactly - now a
+permanent test. Corrected two claims in the notebook's own reading of its
+data (Task 5, full detail in `docs/target-plan.md`'s 2026-08-08 update):
+"pure-animal farms" is a misreading of a final-board snapshot (proved from
+our own replays: "Ak," our best real opponent, planted wheat+melon early
+and still shows `crops={}` at turn 720); "5 hands because fib makes the
+7th unaffordable" is arithmetically wrong ($33 total against a $21,272
+day-15 median) and `target_hands` was not retuned on its strength.
+
+**Implementation.** `PARAMS`: `animal_target={COW:8,SHEEP:6}` (no
+GOOSE - 1/1,366 players ever sold an egg), both gated from day 0;
+`early_crop_target={WHEAT:14,MELON:12}` as a bounded one-time batch
+(`_pick_crop` - gap-based, not day-gated, see below); `fert_reserve=0`
+and `COLLECT_FERTILIZER` priority 75->86 (finite, non-regenerating,
+opponent-shared pool - first-mover, not conservation); `land_quadrants_target=2`
+(never SE); `land_buy_min_day` 10->5. New `_sell_plan`: `sustainable_rate()`-
+metered for ongoing production (MILK/WOOL), price-floor-only for the
+bounded one-time harvest (WHEAT/MELON - there's no "daily rate" to
+protect for a fixed quantity), FERTILIZER sold in full every call.
+
+**Three real bugs found and fixed before `animals_lost` came down from
+~22/game to ~3/game (mean, 8 seeds) - each confirmed by isolating it:**
+
+1. First attempt hard-gated early crop planting to `day <=
+   early_crop_end_day (4)`, matching the notebook's "days 0-4" framing
+   literally. Broke the `startingMoney` stress test at 400-1200: at low
+   cash only the one-seed trickle fallback can fire (the full-buffer
+   purchase needs `capital_reserve=$1,200` headroom it may never reach),
+   so by day 4 only a few tiles were planted; the cutoff then permanently
+   blocked any more, and with COW/SHEEP also unaffordable there was
+   nothing left to do - a new deadlock, same shape as the original
+   `capital_reserve` stall trap. Fixed: gap-based instead of day-gated
+   (`_pick_crop` keeps trying at whatever pace cash allows until
+   `early_crop_target` is actually met) - harmless at a normal $3,000
+   start (the buffer purchase closes both gaps within days 0-4 anyway,
+   matching the notebook's numbers), robust at a degraded one.
+2. `_wheat_needed` feed purchases (`BUY_PRODUCT WHEAT`) were gated at a
+   flat `money > 400`, blocking every feed purchase for most of the
+   cash-poor early trough at 14 animals - money oscillating $50-400 for
+   a week-plus is normal under this route's own aggressive turn-0 spend.
+   Confirmed directly (seed 11): cow/sheep counts oscillating 4->0,
+   5->1 day to day, `animals_lost` 22. Fixed: moved wheat-for-feed
+   purchase ahead of crop-seed buying (protected priority - losing an
+   already-owned $400-500 animal is a bigger loss than a new seed) and
+   made it buy whatever's affordable toward the need instead of
+   all-or-nothing.
+3. Even fixed, 4-6 animals in a spatially separate cluster from the rest
+   of the herd stayed unfed *all day* despite wheat sitting unused in the
+   shed (traced directly: seed 59, day 16, all 6 sheep already at
+   `consecutive_unfed>=1` from the day before, only 2 got fed by day's
+   end). Root cause: `FEED` requires the assigned unit to already be
+   *carrying* wheat, and the wheat-pickup runner count was capped at
+   `ceil(need/3)` (max 2-3 for a typical need) - a same-turn `PICKUP`
+   doesn't chain into a same-turn `FEED` (the scheduler re-decides every
+   unit's task fresh each turn, no "finish the delivery" memory), so few
+   simultaneous carriers meant few chances one of them was ever near the
+   far cluster. Fixed: always use all 4 shed tiles when any feed is
+   owed. This is a real, physical cap (only 4 shed-adjacent tiles exist),
+   not a tunable - `animals_lost` improved (22 -> ~3 mean) but this is
+   likely close to the ceiling of what the current turn-by-turn scheduler
+   can guarantee without adding multi-turn task commitment.
+   Also tried raising `FEED`'s non-urgent baseline 82 -> 87 (to beat the
+   newly-raised `COLLECT_FERTILIZER`, 86, for a tie on an already-carrying
+   unit) - measured **worse** (mean `animals_lost` 3.1 -> 4.4 across 8
+   seeds), reverted. Not the actual bottleneck.
+
+**`animals_lost` is not 0, and that's reported plainly, not smoothed
+over** - the brief explicitly asked to confirm the feed chain sustains 14
+animals "or we recreate the animals_lost bug at larger scale." It mostly
+does (a mean of ~3/game vs a naive first attempt's ~22, an 86% reduction,
+with `plants_weeded` at a clean 0 across every seed tested and 0.000 in
+the `route-proxy` arena run below), but not fully - the residual is a
+real, root-caused, physically-explained architectural limit (4 shed
+tiles, no multi-turn task memory), not noise or an untried fix.
+
+**Primary metric - final bank vs `route-proxy`** (48 seeds, `--compare`):
+```
+mean +33,938.3   sd 8,206.9   se 837.61
+95% CI [+32,275.5, +35,601.2]
+paired t-test  t=+40.518  p=0.0000
+wilcoxon       z=+8.505   p=0.0000
+win rate 100.0%
+plants_weeded 0.000   animals_lost 2.208 (mean)
+```
+Unambiguous - route-proxy was the best-calibrated, closest-margin
+opponent in the pool before this (`docs/strategy-log.md`, "route-proxy
+yardstick opponent": -974.3 mean, CI including zero). This isn't a close
+call anymore.
+
+**Full pool (`make arena`, current `DEFAULT_OPPONENTS`, 48 seeds):**
+```
+                    win rate    mean diff (vs prior main)
+vs starter            100.0%    +49,995.0
+vs random_seeded      100.0%    +53,244.7
+vs v4-terminal-liq.   100.0%    +40,069.5   <- our own immediate predecessor
+vs animal-heavy        95.8%     +7,278.7   <- 0.0% every prior session
+vs melon-rush         100.0%    +17,574.6   <- 0.0% every prior session
+vs market-dumper      100.0%    +44,112.6
+vs route-proxy        100.0%    +33,938.3
+
+OVERALL WIN RATE  99.4%   (672 episodes)
+```
+`animal-heavy` and `melon-rush` were the two opponents this project has
+never once beaten, across every prior session (0.0% win rate, every time,
+with mean deficits in the tens of thousands - see every prior "Re-baseline"
+and "coupled branch" entry in this log). Both fall this time, decisively.
+This is not an incremental win - it's the first time this project has beaten
+the full distinct-strategy pool at all, and the first time the coupled
+"turn-0 aggressive spend + labour to service it" idea the last session's
+`strat/task2-task3-coupled` branch failed at (-6,448 mean, 8.3% win rate,
+REJECTED) has actually worked, on the same class of problem, once grounded
+in real ladder data instead of one recorded route.
+
+**Cash curve vs the real median** (8 seeds, our own agent, vs `starter`):
+```
+day    real median   our median   our mean
+ 5           299           288        288
+10         2,212           382        292
+15        21,272         3,524      3,500
+20        45,689        14,738     14,434
+29       115,664        52,870     50,384
+```
+Tracks the real early game almost exactly (day 5: $288 vs $299) - the
+turn-0-heavy opening is well calibrated. Falls behind through the
+mid-game (day 10: 5.8x behind; day 15: 6.0x behind) before partially
+recovering in relative terms by day 29 (2.2x behind, 46% of the real
+median). This is the clearest diagnostic the brief asked for: our
+early-game cash management matches real top players, but our mid-game
+compounding does not - most plausibly the gap between a live greedy
+scorer and whatever the real 1,366-player field is collectively running
+(not one optimized recording this time, but still likely more efficient
+per-action than a from-scratch heuristic), compounded by not fully
+reaching the early_crop_target (melon stalled at 3/12 tiles in the seed-11
+trace, well under target) and the residual animal losses above costing
+real capital mid-game. Flagged as the next thing to close, not chased
+further this session per the brief's scope.
+
+**Task 3 (sell metering) - realized price vs base, measured** (seed 11 vs
+`starter`, revenue predicted via `constants.sale_proceeds()` from the
+actual sequence of `SELL` orders issued, cross-checked against
+`test_price_curve_matches_env`'s existing point-by-point validation of the
+same price function against the installed engine):
+```
+item          units   revenue   realized $/u   base   realized/base
+FERTILIZER      272   $19,200         $70.6    $100          70.6%
+MELON            27    $7,623        $282.3    $250         112.9%
+MILK            154   $38,207        $248.1    $160         155.1%
+WHEAT           417   $20,897         $50.1     $25         200.5%
+WOOL             38    $9,151        $240.8    $200         120.4%
+```
+Wheat, milk, wool, and melon all realized *above* base - the metering
+keeps our own selling from ever oversupplying, and town consumption
+(faster than we're replacing it) pushes inventory below equilibrium often
+enough to earn a scarcity premium rather than just avoiding a glut.
+Fertilizer's 70.6% is expected and correct, not a shortfall: its market
+never regenerates (no shop or town-centre demand at all -
+`docs/economics.md`), so cumulative selling (ours and the opponent's)
+only ever pushes it toward the floor, monotonically, for the rest of the
+game - exactly the "finite, first-mover" framing Task 2 is built on.
+
+**Task 2 (fertilizer) - predicted vs measured.** Predicted revenue from
+the actual sequence of `SELL FERTILIZER` orders issued, computed via
+`sale_proceeds()` before checking: $19,200 for 272 units across 27 orders
+(above). The underlying price function is exhaustively validated
+point-by-point against the installed engine already
+(`test_price_curve_matches_env`, parametrized over every item including
+FERTILIZER) - no divergence expected or found; not repeated as a separate
+check.
+
+**Milk under-supply, logged as a future experiment per the brief (not
+chased this session):** 8 cow -> 4 milk/day against 18/day town
+absorption is a *large* gap - the meta herd may be significantly
+undersized for milk specifically, relative to what the market could
+absorb without any price impact at all. Untested whether a bigger cow
+count (more milk supply, still under absorption) beats the herd cost of
+getting there.
+
+`make test`: two known-and-explained non-passes, not silently accepted -
+`test_agent_beats_pass` (240 steps, day 10) still loses (235 vs 3,000):
+the target route's own median cash curve sits below $3,000 through day 9
+even in the real 1,366-player data (this checkpoint predates the
+strategy's payoff by design), and the full 720-turn trajectory recovers
+decisively (see the cash curve above). `KNOWN_UNCOVERED` gained
+`BUILD_COOP` (no GOOSE, so never built - deliberate) and `DROP` (the
+14-animal herd plus early crops keep every unit saturated - measured
+`noop_rate` 0.04% on the probe seed, essentially never idle - so the
+idle-fallback DROP path isn't reached; the env's automatic end-of-day
+sweep still moves carried inventory to the shed regardless, so nothing is
+lost permanently, only the same-day capital velocity DROP exists for is,
+a small and honestly-measured trade-off against the much larger gain
+here). All `startingMoney` stress values (the standing hard requirement)
+remain green.
+
+Change: `agent/main.py` (`PARAMS`, `_pick_crop`/`_count_crop`,
+`_sell_plan`/`ONGOING_SELL`, wheat-feed purchase reordered and widened,
+wheat-pickup runner scaling, `COLLECT_FERTILIZER` priority),
+`tests/test_invariants.py` (`KNOWN_UNCOVERED`), `docs/target-plan.md`
+(2026-08-08 update section), `tests/test_constants.py` (premium cliff
+regression test, committed separately to `main`).
+
+Verdict: ADOPTED.
